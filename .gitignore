@@ -1,0 +1,23 @@
+# Only source-controlled application files under outputs
+/outputs/*
+!/outputs/DuckIsland/
+/work/
+/docs/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.build/
+*.app/
+*.xcarchive/
+*.dSYM/
+*.pkg
+*.dmg
+*.zip
+.env
+.env.*
+*.pem
+*.p12
+*.keychain-db
+*.mobileprovision
+*.provisionprofile

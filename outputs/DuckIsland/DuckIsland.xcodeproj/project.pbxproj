@@ -1,0 +1,472 @@
+// !$*UTF8*$!
+{
+"archiveVersion" = 1;
+"classes" = {
+};
+"objectVersion" = 56;
+"objects" = {
+"88C2479FC07ABC026851F541" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "MeetingCapture.swift";
+"sourceTree" = "<group>";
+};
+"7BF70999EA0C740DD23F55A5" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "MeetingRecognition.swift";
+"sourceTree" = "<group>";
+};
+"1C46A05E6954A7AA0691E9E0" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "NotesExport.swift";
+"sourceTree" = "<group>";
+};
+"79B1EE2DA8CDA7262594613A" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "ReviewExport.swift";
+"sourceTree" = "<group>";
+};
+"264D4F7D40302370E38E80EF" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "ReviewModel.swift";
+"sourceTree" = "<group>";
+};
+"5EEEF86363A3A1DF0F0D31A6" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "ReviewPanels.swift";
+"sourceTree" = "<group>";
+};
+"709321C07F197A55C1938CEE" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "ScreenReader.swift";
+"sourceTree" = "<group>";
+};
+"FA8ABE8CBAAAF61A98DDC58B" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "ScreenWindows.swift";
+"sourceTree" = "<group>";
+};
+"FD87F1082AB3A1C0ECAE3235" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "SelfTests.swift";
+"sourceTree" = "<group>";
+};
+"091DC135A8BFC549921080FB" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "SpeechProbe.swift";
+"sourceTree" = "<group>";
+};
+"F9CB23E95BD531E70A71B503" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "VoiceInput.swift";
+"sourceTree" = "<group>";
+};
+"909767498633C8004519C6F0" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "main.swift";
+"sourceTree" = "<group>";
+};
+"E55CBCA78023D88AA8B06D54" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "sourcecode.swift";
+"path" = "AppStore/Helper/main.swift";
+"sourceTree" = "<group>";
+};
+"84A5916ECDABDF918CB8D2CD" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "image.png";
+"path" = "Assets/duck.png";
+"sourceTree" = "<group>";
+};
+"3C4206ABF63FF3348B3AEB36" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "image.png";
+"path" = "Assets/koala.png";
+"sourceTree" = "<group>";
+};
+"FEC6D016A3B4DE6474135F9D" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "image.png";
+"path" = "Assets/monkey.png";
+"sourceTree" = "<group>";
+};
+"CE4FE3E79421F35E6840B962" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "image.png";
+"path" = "Assets/parrot.png";
+"sourceTree" = "<group>";
+};
+"C5BEEF2DE776A9EB64B6A612" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "text.xml";
+"path" = "AppStore/PrivacyInfo.xcprivacy";
+"sourceTree" = "<group>";
+};
+"96ED5C5789B174A01557791C" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "text.html";
+"path" = "AppStore/Privacy.html";
+"sourceTree" = "<group>";
+};
+"F8995BA5891B07E328C60D6B" = {
+"isa" = "PBXFileReference";
+"lastKnownFileType" = "image.icns";
+"path" = "AppStore/AppIcon.icns";
+"sourceTree" = "<group>";
+};
+"38A007151ABE87CC01A5B6E9" = {
+"isa" = "PBXFileReference";
+"explicitFileType" = "wrapper.application";
+"path" = "Duck Island.app";
+"sourceTree" = "BUILT_PRODUCTS_DIR";
+};
+"2E868E41F63667F608536873" = {
+"isa" = "PBXFileReference";
+"explicitFileType" = "compiled.mach-o.executable";
+"path" = "NotesHelper";
+"sourceTree" = "BUILT_PRODUCTS_DIR";
+};
+"FBDC4F23F93125BBEEAE800C" = {
+"isa" = "PBXGroup";
+"children" = ("38A007151ABE87CC01A5B6E9","2E868E41F63667F608536873");
+"name" = "Products";
+"sourceTree" = "<group>";
+};
+"DC76E9F0C0006E8F919E0C51" = {
+"isa" = "PBXGroup";
+"children" = ("88C2479FC07ABC026851F541","7BF70999EA0C740DD23F55A5","1C46A05E6954A7AA0691E9E0","79B1EE2DA8CDA7262594613A","264D4F7D40302370E38E80EF","5EEEF86363A3A1DF0F0D31A6","709321C07F197A55C1938CEE","FA8ABE8CBAAAF61A98DDC58B","FD87F1082AB3A1C0ECAE3235","091DC135A8BFC549921080FB","F9CB23E95BD531E70A71B503","909767498633C8004519C6F0","E55CBCA78023D88AA8B06D54","84A5916ECDABDF918CB8D2CD","3C4206ABF63FF3348B3AEB36","FEC6D016A3B4DE6474135F9D","CE4FE3E79421F35E6840B962","C5BEEF2DE776A9EB64B6A612","96ED5C5789B174A01557791C","F8995BA5891B07E328C60D6B","FBDC4F23F93125BBEEAE800C");
+"sourceTree" = "<group>";
+};
+"190D4403AC275AC4C3E19D36" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "88C2479FC07ABC026851F541";
+};
+"DB80D1749FFE87E2F107C011" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "7BF70999EA0C740DD23F55A5";
+};
+"7F365B994C7735E7E1686BED" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "1C46A05E6954A7AA0691E9E0";
+};
+"B5C076417014C9A02DD47248" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "79B1EE2DA8CDA7262594613A";
+};
+"36B75E842072570C88EEA6A9" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "264D4F7D40302370E38E80EF";
+};
+"F7D1BAE94123910E7F2A44E7" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "5EEEF86363A3A1DF0F0D31A6";
+};
+"62781D6B87F9F5B426293A45" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "709321C07F197A55C1938CEE";
+};
+"414BC8DDF575058D3A5FF3B2" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "FA8ABE8CBAAAF61A98DDC58B";
+};
+"2B5A68678D414C2DD4BB53E5" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "FD87F1082AB3A1C0ECAE3235";
+};
+"AD43B68101BCB24B15D0EDAA" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "091DC135A8BFC549921080FB";
+};
+"CD34E71D0CBF6CD862F13971" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "F9CB23E95BD531E70A71B503";
+};
+"88EC85445C46DF552A14B94F" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "909767498633C8004519C6F0";
+};
+"BCE16DD0260827ECF338C787" = {
+"isa" = "PBXSourcesBuildPhase";
+"buildActionMask" = 2147483647;
+"files" = ("190D4403AC275AC4C3E19D36","DB80D1749FFE87E2F107C011","7F365B994C7735E7E1686BED","B5C076417014C9A02DD47248","36B75E842072570C88EEA6A9","F7D1BAE94123910E7F2A44E7","62781D6B87F9F5B426293A45","414BC8DDF575058D3A5FF3B2","2B5A68678D414C2DD4BB53E5","AD43B68101BCB24B15D0EDAA","CD34E71D0CBF6CD862F13971","88EC85445C46DF552A14B94F");
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"084D1648526B97CAD4762F8F" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "E55CBCA78023D88AA8B06D54";
+};
+"024962C6B7AEC3F05B265830" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "1C46A05E6954A7AA0691E9E0";
+};
+"5F9933B2BB266EAD0E00634B" = {
+"isa" = "PBXSourcesBuildPhase";
+"buildActionMask" = 2147483647;
+"files" = ("084D1648526B97CAD4762F8F","024962C6B7AEC3F05B265830");
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"7B5C2702E7026F99235AE287" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "84A5916ECDABDF918CB8D2CD";
+};
+"99C3A3E1A88E64DE0776CBC7" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "3C4206ABF63FF3348B3AEB36";
+};
+"3DC5ADF0825BC1E58D388F18" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "FEC6D016A3B4DE6474135F9D";
+};
+"9553A4B0292CD0B3A3FF88A2" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "CE4FE3E79421F35E6840B962";
+};
+"448214A5ECE7D5F73E7B31D0" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "C5BEEF2DE776A9EB64B6A612";
+};
+"B96B68730B6B05CA4A089CDD" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "96ED5C5789B174A01557791C";
+};
+"D93940FC0ADC3B4D5AA3D773" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "F8995BA5891B07E328C60D6B";
+};
+"0189424A5A60FED329FA868E" = {
+"isa" = "PBXResourcesBuildPhase";
+"buildActionMask" = 2147483647;
+"files" = ("7B5C2702E7026F99235AE287","99C3A3E1A88E64DE0776CBC7","3DC5ADF0825BC1E58D388F18","9553A4B0292CD0B3A3FF88A2","448214A5ECE7D5F73E7B31D0","B96B68730B6B05CA4A089CDD","D93940FC0ADC3B4D5AA3D773");
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"E140FFF2543046A4AC4941AF" = {
+"isa" = "PBXBuildFile";
+"fileRef" = "2E868E41F63667F608536873";
+"settings" = {
+"ATTRIBUTES" = ("CodeSignOnCopy");
+};
+};
+"B0335F624DF11E4C9B56E42C" = {
+"isa" = "PBXCopyFilesBuildPhase";
+"buildActionMask" = 2147483647;
+"dstPath" = "Contents/Helpers";
+"dstSubfolderSpec" = 1;
+"files" = ("E140FFF2543046A4AC4941AF");
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"7561BFB015D8F536760CB671" = {
+"isa" = "PBXFrameworksBuildPhase";
+"buildActionMask" = 2147483647;
+"files" = ();
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"706A699C2394474D98BA4108" = {
+"isa" = "PBXFrameworksBuildPhase";
+"buildActionMask" = 2147483647;
+"files" = ();
+"runOnlyForDeploymentPostprocessing" = 0;
+};
+"4E7CAC2538707F9BDAFB9367" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"ENABLE_DEBUG_DYLIB" = "NO";
+"ALWAYS_SEARCH_USER_PATHS" = "NO";
+"SDKROOT" = "macosx";
+"MACOSX_DEPLOYMENT_TARGET" = "15.0";
+"SWIFT_VERSION" = "5.0";
+"ARCHS" = "arm64";
+"CODE_SIGN_STYLE" = "Automatic";
+"DEVELOPMENT_TEAM" = "86NX4VWHDU";
+"ENABLE_HARDENED_RUNTIME" = "YES";
+"ENABLE_APP_SANDBOX" = "YES";
+"SWIFT_EMIT_LOC_STRINGS" = "YES";
+"PRODUCT_NAME" = "NotesHelper";
+"PRODUCT_BUNDLE_IDENTIFIER" = "local.rexlv.duckisland.notes-helper";
+"CODE_SIGN_ENTITLEMENTS" = "AppStore/Helper.entitlements";
+"SKIP_INSTALL" = "YES";
+"GENERATE_INFOPLIST_FILE" = "NO";
+"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+"DEBUG_INFORMATION_FORMAT" = "dwarf";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE DEBUG";
+};
+"name" = "Debug";
+};
+"44552955CB5237C727A4801F" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"ENABLE_DEBUG_DYLIB" = "NO";
+"ALWAYS_SEARCH_USER_PATHS" = "NO";
+"SDKROOT" = "macosx";
+"MACOSX_DEPLOYMENT_TARGET" = "15.0";
+"SWIFT_VERSION" = "5.0";
+"ARCHS" = "arm64";
+"CODE_SIGN_STYLE" = "Automatic";
+"DEVELOPMENT_TEAM" = "86NX4VWHDU";
+"ENABLE_HARDENED_RUNTIME" = "YES";
+"ENABLE_APP_SANDBOX" = "YES";
+"SWIFT_EMIT_LOC_STRINGS" = "YES";
+"PRODUCT_NAME" = "NotesHelper";
+"PRODUCT_BUNDLE_IDENTIFIER" = "local.rexlv.duckisland.notes-helper";
+"CODE_SIGN_ENTITLEMENTS" = "AppStore/Helper.entitlements";
+"SKIP_INSTALL" = "YES";
+"GENERATE_INFOPLIST_FILE" = "NO";
+"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE";
+};
+"name" = "Release";
+};
+"2D4D8D0205E2A2F9C884F4B5" = {
+"isa" = "XCConfigurationList";
+"buildConfigurations" = ("4E7CAC2538707F9BDAFB9367","44552955CB5237C727A4801F");
+"defaultConfigurationIsVisible" = 0;
+"defaultConfigurationName" = "Release";
+};
+"E5CDEE824512996ECBD71AE4" = {
+"isa" = "PBXNativeTarget";
+"buildConfigurationList" = "2D4D8D0205E2A2F9C884F4B5";
+"buildPhases" = ("5F9933B2BB266EAD0E00634B","706A699C2394474D98BA4108");
+"buildRules" = ();
+"dependencies" = ();
+"name" = "NotesHelper";
+"productName" = "NotesHelper";
+"productReference" = "2E868E41F63667F608536873";
+"productType" = "com.apple.product-type.tool";
+};
+"D799BAE6088A90139B415FCC" = {
+"isa" = "PBXContainerItemProxy";
+"containerPortal" = "98F54143AB4E86B28C3AFEE0";
+"proxyType" = 1;
+"remoteGlobalIDString" = "E5CDEE824512996ECBD71AE4";
+"remoteInfo" = "NotesHelper";
+};
+"DE58E2B17C19600779694943" = {
+"isa" = "PBXTargetDependency";
+"target" = "E5CDEE824512996ECBD71AE4";
+"targetProxy" = "D799BAE6088A90139B415FCC";
+};
+"E9B2E96ABC5F6856F2BE79CF" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"ENABLE_DEBUG_DYLIB" = "NO";
+"ALWAYS_SEARCH_USER_PATHS" = "NO";
+"SDKROOT" = "macosx";
+"MACOSX_DEPLOYMENT_TARGET" = "15.0";
+"SWIFT_VERSION" = "5.0";
+"ARCHS" = "arm64";
+"CODE_SIGN_STYLE" = "Automatic";
+"DEVELOPMENT_TEAM" = "86NX4VWHDU";
+"ENABLE_HARDENED_RUNTIME" = "YES";
+"ENABLE_APP_SANDBOX" = "YES";
+"SWIFT_EMIT_LOC_STRINGS" = "YES";
+"PRODUCT_NAME" = "Duck Island";
+"PRODUCT_BUNDLE_IDENTIFIER" = "local.rexlv.duckisland";
+"INFOPLIST_FILE" = "AppStore/Info.plist";
+"CODE_SIGN_ENTITLEMENTS" = "AppStore/DuckIsland.entitlements";
+"GENERATE_INFOPLIST_FILE" = "NO";
+"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)","@executable_path/../Frameworks");
+"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+"DEBUG_INFORMATION_FORMAT" = "dwarf";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE DEBUG";
+};
+"name" = "Debug";
+};
+"5A8C91857F674E16E2724F47" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"ENABLE_DEBUG_DYLIB" = "NO";
+"ALWAYS_SEARCH_USER_PATHS" = "NO";
+"SDKROOT" = "macosx";
+"MACOSX_DEPLOYMENT_TARGET" = "15.0";
+"SWIFT_VERSION" = "5.0";
+"ARCHS" = "arm64";
+"CODE_SIGN_STYLE" = "Automatic";
+"DEVELOPMENT_TEAM" = "86NX4VWHDU";
+"ENABLE_HARDENED_RUNTIME" = "YES";
+"ENABLE_APP_SANDBOX" = "YES";
+"SWIFT_EMIT_LOC_STRINGS" = "YES";
+"PRODUCT_NAME" = "Duck Island";
+"PRODUCT_BUNDLE_IDENTIFIER" = "local.rexlv.duckisland";
+"INFOPLIST_FILE" = "AppStore/Info.plist";
+"CODE_SIGN_ENTITLEMENTS" = "AppStore/DuckIsland.entitlements";
+"GENERATE_INFOPLIST_FILE" = "NO";
+"LD_RUNPATH_SEARCH_PATHS" = ("$(inherited)","@executable_path/../Frameworks");
+"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE";
+};
+"name" = "Release";
+};
+"F37922C48DA5978D02C9E50E" = {
+"isa" = "XCConfigurationList";
+"buildConfigurations" = ("E9B2E96ABC5F6856F2BE79CF","5A8C91857F674E16E2724F47");
+"defaultConfigurationIsVisible" = 0;
+"defaultConfigurationName" = "Release";
+};
+"F75109BEB4DD8800DA6B45F8" = {
+"isa" = "PBXNativeTarget";
+"buildConfigurationList" = "F37922C48DA5978D02C9E50E";
+"buildPhases" = ("BCE16DD0260827ECF338C787","7561BFB015D8F536760CB671","0189424A5A60FED329FA868E","B0335F624DF11E4C9B56E42C");
+"buildRules" = ();
+"dependencies" = ("DE58E2B17C19600779694943");
+"name" = "DuckIsland";
+"productName" = "Duck Island";
+"productReference" = "38A007151ABE87CC01A5B6E9";
+"productType" = "com.apple.product-type.application";
+};
+"89E1FD6268CC0F221A2BE178" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+"DEBUG_INFORMATION_FORMAT" = "dwarf";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE DEBUG";
+};
+"name" = "Debug";
+};
+"E6DE6C99132752C914FEF632" = {
+"isa" = "XCBuildConfiguration";
+"buildSettings" = {
+"SWIFT_OPTIMIZATION_LEVEL" = "-O";
+"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "APP_STORE";
+};
+"name" = "Release";
+};
+"862894B703A6DEDF96A9DD6C" = {
+"isa" = "XCConfigurationList";
+"buildConfigurations" = ("89E1FD6268CC0F221A2BE178","E6DE6C99132752C914FEF632");
+"defaultConfigurationIsVisible" = 0;
+"defaultConfigurationName" = "Release";
+};
+"98F54143AB4E86B28C3AFEE0" = {
+"isa" = "PBXProject";
+"attributes" = {
+"LastUpgradeCheck" = "2620";
+};
+"buildConfigurationList" = "862894B703A6DEDF96A9DD6C";
+"compatibilityVersion" = "Xcode 14.0";
+"developmentRegion" = "zh-Hans";
+"hasScannedForEncodings" = 0;
+"knownRegions" = ("zh-Hans","en","Base");
+"mainGroup" = "DC76E9F0C0006E8F919E0C51";
+"productRefGroup" = "FBDC4F23F93125BBEEAE800C";
+"projectDirPath" = "";
+"projectRoot" = "";
+"targets" = ("F75109BEB4DD8800DA6B45F8","E5CDEE824512996ECBD71AE4");
+};
+};
+"rootObject" = "98F54143AB4E86B28C3AFEE0";
+}
