@@ -3,6 +3,7 @@ import Speech
 import AVFoundation
 
 @MainActor final class VoiceInput: ObservableObject {
+    @Published var unavailableReason: String?
     @Published var draft = ""
     @Published var dictating = false
     @Published var voicePreparing = false
@@ -17,6 +18,7 @@ import AVFoundation
     private var voicePrefix = ""
     var voiceActive: Bool { dictating || voicePreparing || voiceFinishing }
     func toggleVoice() {
+        guard unavailableReason == nil else { status = unavailableReason!; return }
         if dictating { finishVoice(cancel:false); return }
         guard !voiceActive else { return }
         voicePreparing = true; let token = UUID(); voiceToken = token

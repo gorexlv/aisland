@@ -230,11 +230,11 @@ struct ReviewSidebar:View {
                         Text("#\(region.number) 评审意见").font(.system(size:11,weight:.medium))
                         Spacer()
                         Button { voice.toggleVoice() } label:{Image(systemName:voice.dictating ? "stop.circle.fill" : "mic.fill").foregroundStyle(voice.dictating ? .red : .yellow)}
-                            .disabled(model.busy || voice.voicePreparing || voice.voiceFinishing).help(voice.dictating ? "结束语音" : "语音评审意见")
+                            .disabled(model.busy || voice.voicePreparing || voice.voiceFinishing || voice.unavailableReason != nil).help(voice.dictating ? "结束语音" : "语音评审意见")
                     }
                     TextEditor(text:$voice.draft).font(.system(size:12)).frame(height:65).scrollContentBackground(.hidden)
                         .padding(5).background(.white.opacity(0.07),in:RoundedRectangle(cornerRadius:7)).disabled(voice.voiceActive)
-                    Text(voice.status).font(.system(size:10)).foregroundStyle(voice.voiceActive ? .yellow : .gray).lineLimit(2)
+                    Text(voice.unavailableReason ?? voice.status).font(.system(size:10)).foregroundStyle(voice.voiceActive ? .yellow : .gray).lineLimit(2)
                 }
                 Button { model.finish() } label: {
                     Label(model.copied ? "已复制 · 再次复制" : "复制全部",systemImage:"doc.on.doc").frame(maxWidth:.infinity).padding(8)

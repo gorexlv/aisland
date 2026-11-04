@@ -48,12 +48,20 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     @Published var permissionError = false
     @Published var selecting = false
     @Published var preview:NSImage?
+    private var regionPanels:[NSPanel] = []
+    var captureRegionImage: (UInt32, CGRect) async throws -> Data = { try await captureDisplayRegion(displayID:$0,region:$1) }
+    var loadTargets: () async throws -> [ScreenTarget] = { try await visibleScreenTargets() }
+    private let storageRoot: URL?
+    init(storageRoot: URL? = nil) { self.storageRoot = storageRoot }
+    private var savedText: String?
+    var resultLabel: String? { pending?.1.label }
+    var dirty: Bool { pending != nil && text != savedText }
     private var overlay:NSPanel?
     private var token = UUID()
     private var pending: (ScreenReadResult, ScreenTarget, CGRect)?
     var onNotice:((String)->Void)?
     func open() { visible = true; refresh() }
-    func cancel() { token = UUID(); busy = false; selecting = false; overlay?.close(); overlay = nil }
+    func cancel() { token = UUID(); busy = false; selecting = false; overlay?.close(); overlay = nil; regionPanels.forEach { $0.close() }; regionPanels = [] }
     func hide() { cancel(); visible = false }
     func refresh() {
         cancel(); selected = nil; targets = []; busy = true; permissionError = false
@@ -62,7 +70,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
         Task {
             defer { if token == session { busy = false } }
             do {
-                let windows = try await visibleScreenTargets()
+                let windows = try await loadTargets()
                 guard session == token else { return }
                 targets = windows; status = windows.isEmpty ? "没有可选窗口，请打开应用后刷新" : "选择要框选的窗口"
                 if windows.count == 1 { select(windows[0]) }
@@ -72,7 +80,8 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     func select(_ target:ScreenTarget) { selected = target; capture() }
     func capture() {
         guard let target = selected else { return }
-        cancel(); busy = true; text = ""; savedFile = nil; preview = nil; pending = nil
+        if target.pid == 0 { captureRegion(); return }
+        cancel(); busy = true
         let session = token
         status = "正在准备框选画面…"
         Task {
@@ -94,7 +103,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
             } catch { guard session == token else { return }; status = error.localizedDescription }
         }
     }
-    private func extract(data:Data, region:CGRect, target:ScreenTarget) {
+    private func extract(data:Data, region:CGRect, target:ScreenTarget, sourceRegion:CGRect? = nil) {
         overlay?.close(); overlay = nil; selecting = false; busy = true
         let session = token; status = "正在识别框选区域…"
         Task {
@@ -102,23 +111,86 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
             do {
                 let result = try await Task.detached(priority:.userInitiated) { try recognizeScreenRegion(png:data,region:region) }.value
                 guard session == token else { return }
-                guard !result.text.isEmpty else { status = "没有识别到文字，请重新框选"; return }
-                text = result.text; preview = NSImage(data:result.image); pending = (result,target,region)
-                save()
+                accept(result,target:target,region:sourceRegion ?? region)
+
             } catch { guard session == token else { return }; status = "识别失败：\(error.localizedDescription)" }
         }
+    }
+    enum ReplacementChoice { case keep, save, discard }
+    // Shared completion path: failed/cancelled captures never reach this point.
+    func accept(_ result: ScreenReadResult, target: ScreenTarget, region: CGRect, choice: ReplacementChoice? = nil) {
+        guard !result.text.isEmpty else { status = "没有识别到文字，原文字保留"; return }
+        guard allowReplacement(choice) else { status = "已保留上次文字"; return }
+        savedFile = nil; savedText = nil
+        text = result.text; preview = NSImage(data:result.image); pending = (result,target,region)
+        save()
     }
     func save() {
         guard let (result,target,region) = pending else { return }
         do {
-            savedFile = try saveScreenRead(result,source:target,region:region)
-            pending = nil
+            savedFile = try saveScreenRead(ScreenReadResult(text:text,image:result.image),source:target,region:region,root:storageRoot)
+            savedText = text
             status = "已保存：" + (savedFile?.deletingLastPathComponent().lastPathComponent ?? "")
             onNotice?("读屏文字已保存")
         } catch { status = "保存失败：\(error.localizedDescription)，文字仍保留，可重试保存" }
     }
-    var canRetrySave:Bool { pending != nil && savedFile == nil }
-    func copy() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text,forType:.string); status = savedFile == nil ? "文字已复制，请重试保存" : "文字已复制 · 本地文件已保留" }
+    func preserveForTermination() -> Bool {
+        if dirty { save() }
+        return !dirty
+    }
+    var canRetrySave:Bool { pending != nil && dirty }
+    private func allowReplacement(_ choice: ReplacementChoice? = nil) -> Bool {
+        guard dirty else { return true }
+        if let choice {
+            switch choice {
+            case .keep: return false
+            case .save: save(); return !dirty
+            case .discard: return true
+            }
+        }
+        let alert = NSAlert(); alert.messageText = "保留当前未保存文字？"
+        alert.informativeText = "另存成功后显示新结果；保留会取消替换。"
+        alert.addButton(withTitle:"保留当前"); alert.addButton(withTitle:"另存并继续"); alert.addButton(withTitle:"放弃并继续")
+        switch alert.runModal() {
+        case .alertSecondButtonReturn: save(); return !dirty
+        case .alertThirdButtonReturn: return true
+        default: return false
+        }
+    }
+    func captureRegion() {
+        cancel(); visible = true; status = "在任意屏幕拖动框选 · Esc 取消"
+        for screen in NSScreen.screens {
+            let panel = IslandPanel(contentRect:screen.frame,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
+            panel.isOpaque = false; panel.backgroundColor = .clear; panel.level = .screenSaver
+            panel.isReleasedWhenClosed = false
+            let canvas = ScreenReadCanvas(frame:NSRect(origin:.zero,size:screen.frame.size))
+            canvas.cancelled = { [weak self] in self?.cancel(); self?.status = "已取消框选，原文字保留" }
+            canvas.selected = { [weak self] region in
+                guard let self else { return }
+                let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                self.readRegion(displayID:displayID,name:screen.localizedName,region:region)
+            }
+            panel.contentView = canvas; regionPanels.append(panel); panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(canvas)
+        }
+        selecting = true
+    }
+    func readRegion(displayID: UInt32, name: String, region: CGRect) {
+        cancel(); busy = true; let session = token
+        Task {
+            do {
+                guard session == token else { return }
+                let data = try await captureRegionImage(displayID,region)
+                guard session == token else { return }
+                let target = ScreenTarget(id:displayID,pid:0,app:"屏幕框选",bundleID:"",title:name)
+                selected = target
+                extract(data:data,region:CGRect(x:0,y:0,width:1,height:1),target:target,sourceRegion:region)
+            } catch {
+                if session == token { busy = false; status = "采集失败：\(error.localizedDescription)，原文字保留" }
+            }
+        }
+    }
+    func copy(to pasteboard: NSPasteboard = .general) { pasteboard.clearContents(); pasteboard.setString(text,forType:.string); status = dirty ? "文字已复制 · 当前修改未保存" : "文字已复制 · 本地文件已保留" }
+    func showLastResult() { if let (_,target,_) = pending { selected = target } }
     func reveal() { if let savedFile { NSWorkspace.shared.activateFileViewerSelecting([savedFile]) } }
 }
 
@@ -159,10 +231,11 @@ struct ScreenReaderView:View {
     var body:some View {
         VStack(alignment:.leading,spacing:10) {
             HStack {
-                Text("🐨 " + (reader.selected?.label ?? "选择读屏窗口")).font(.system(size:12,weight:.medium)).lineLimit(1)
+                Text("🐨 " + (reader.selected == nil ? "选择读屏窗口" : (reader.resultLabel ?? reader.selected?.label ?? "屏幕框选"))).font(.system(size:12,weight:.medium)).lineLimit(1)
                 Spacer(minLength:0)
                 Button { reader.hide() } label:{Image(systemName:"chevron.up")}.help("收起读屏")
             }
+            Button("快捷框选屏幕区域") { reader.captureRegion() }.disabled(reader.busy)
             if reader.selected == nil {
                 ScrollView {
                     VStack(spacing:5) {
@@ -175,19 +248,18 @@ struct ScreenReaderView:View {
                     }
                 }.frame(height:166)
                 HStack {
+                    if !reader.text.isEmpty { Button("返回上次结果") { reader.showLastResult() } }
                     Button("刷新窗口") { reader.refresh() }.disabled(reader.busy)
                     if reader.permissionError { Button("屏幕权限") { NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) } }
                 }.font(.system(size:11))
             } else {
-                ScrollView {
-                    Text(reader.text.isEmpty ? "框选需要读取的区域，识别完成后自动保存文字。" : reader.text)
-                        .font(.system(size:13)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading).foregroundStyle(reader.text.isEmpty ? .gray : .white)
-                }.frame(height:166)
+                TextEditor(text:$reader.text).font(.system(size:13)).frame(height:120)
+                Text(reader.dirty ? "有未保存修改" : "文字已保存").font(.system(size:10))
                 HStack {
                     Button("重新框选") { reader.capture() }.disabled(reader.busy)
                     Button("切换窗口") { reader.refresh() }.disabled(reader.busy)
                     Spacer()
-                    if reader.canRetrySave { Button("重试保存") { reader.save() } }
+                    if reader.canRetrySave { Button("保存修改") { reader.save() } }
                     Button("复制") { reader.copy() }.disabled(reader.text.isEmpty)
                     Button("查看文件") { reader.reveal() }.disabled(reader.savedFile == nil)
                 }.font(.system(size:11))
@@ -198,5 +270,68 @@ struct ScreenReaderView:View {
                 if reader.selecting { Button("取消") { reader.cancel(); reader.status = "已取消框选" }.font(.system(size:10)) }
             }
         }.padding(16).buttonStyle(.plain).foregroundStyle(.yellow)
+    }
+}
+
+struct TranscriptFollowState {
+    private(set) var following = true
+    private(set) var unread = false
+    mutating func reading(atBottom: Bool, selecting: Bool) { following = atBottom && !selecting }
+    mutating func appended() -> Bool { if !following { unread = true }; return following }
+    mutating func resume() { following = true; unread = false }
+}
+struct TranscriptReader: NSViewRepresentable {
+    let text: String
+    func makeNSView(context: Context) -> TranscriptScrollContainer { TranscriptScrollContainer() }
+    func updateNSView(_ view: TranscriptScrollContainer, context: Context) { view.update(text) }
+}
+final class TranscriptScrollContainer: NSView, NSTextViewDelegate {
+    let scroll = NSScrollView()
+    let textView = NSTextView()
+    let latest = NSButton(title:"有新内容 · 回到最新",target:nil,action:nil)
+    var follow = TranscriptFollowState()
+    private var observation: NSObjectProtocol?
+    private var updating = false
+    override init(frame: NSRect) {
+        super.init(frame:frame)
+        scroll.hasVerticalScroller = true; scroll.drawsBackground = false
+        textView.isEditable = false; textView.isSelectable = true; textView.drawsBackground = false
+        textView.font = .systemFont(ofSize:16); textView.textColor = .white
+        textView.isVerticallyResizable = true; textView.isHorizontallyResizable = false
+        textView.textContainer?.widthTracksTextView = true; textView.autoresizingMask = [.width]
+        textView.delegate = self; scroll.documentView = textView; addSubview(scroll)
+        latest.target = self; latest.action = #selector(resume); latest.isHidden = true; addSubview(latest)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        observation = NotificationCenter.default.addObserver(forName:NSView.boundsDidChangeNotification,object:scroll.contentView,queue:.main) { [weak self] _ in
+            guard let self, !self.updating else { return }; self.readingChanged()
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    deinit { if let observation { NotificationCenter.default.removeObserver(observation) } }
+    override func layout() {
+        super.layout(); scroll.frame = bounds
+        textView.setFrameSize(NSSize(width:scroll.contentSize.width,height:max(textView.frame.height,bounds.height)))
+        latest.frame = NSRect(x:max(0,bounds.width-170),y:0,width:170,height:26)
+    }
+    func readingChanged() {
+        let bottom = scroll.contentView.bounds.maxY >= textView.bounds.maxY - 12
+        follow.reading(atBottom:bottom,selecting:textView.selectedRange().length > 0)
+        if bottom && follow.following { follow.resume(); latest.isHidden = true }
+    }
+    func textViewDidChangeSelection(_ notification: Notification) { if !updating { readingChanged() } }
+    func update(_ text: String) {
+        guard text != textView.string else { return }
+        let position = scroll.contentView.bounds.origin; let selection = textView.selectedRange()
+        updating = true
+        textView.string = text
+        textView.setSelectedRange(NSRange(location:min(selection.location,text.utf16.count),length:min(selection.length,max(0,text.utf16.count-selection.location))))
+        textView.layoutManager?.ensureLayout(for:textView.textContainer!)
+        if follow.appended() { textView.scrollToEndOfDocument(nil) }
+        else { scroll.contentView.scroll(to:position); scroll.reflectScrolledClipView(scroll.contentView) }
+        latest.isHidden = !follow.unread; updating = false
+    }
+    @objc func resume() {
+        updating = true; textView.setSelectedRange(NSRange(location:textView.string.utf16.count,length:0))
+        follow.resume(); textView.scrollToEndOfDocument(nil); latest.isHidden = true; updating = false
     }
 }
