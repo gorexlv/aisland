@@ -43,16 +43,22 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
     var panels: ReviewPanels!
     private var token = UUID()
     private var saveFolder: URL?
+    private let store = ReviewStore()
+    private let storageRoot: URL?
+    private var autosave: Task<Void,Never>?
+    @Published var recoveryFolder: URL?
     private var voiceChanges: AnyCancellable?
     private var tracking: Timer?
     private var trackingBusy = false
     var onNotice: ((String)->Void)?
-    init() {
+    init(storageRoot: URL? = nil) {
+        self.storageRoot = storageRoot
         panels = ReviewPanels(model:self)
         voiceChanges = voice.$draft.sink { [weak self] text in
             guard let self, let id = self.selectedID, let index = self.regions.firstIndex(where:{$0.id == id}) else { return }
             self.regions[index].feedback = text
             self.copied = false
+            self.scheduleSave()
         }
     }
     func start() {
@@ -62,6 +68,7 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
         token = UUID(); let session = token
         status = "正在扫描当前桌面…"; panels.showSidebar()
         Task {
+            if let root = try? (storageRoot ?? ReviewStore.defaultRoot()) { recoveryFolder = try? await store.latest(root:root) }
             defer { if token == session { busy = false } }
             do {
                 let found = try await visibleScreenTargets()
@@ -75,7 +82,7 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
             } catch { status = "无法读取屏幕，请在系统设置中允许小鸭录制屏幕后重试" }
         }
     }
-    func refreshPicker() { close(); start() }
+    func refreshPicker() { Task { if await closeForTermination() { start() } } }
     func choose(_ item: ScreenTarget) async {
         let session = token
         do {
@@ -105,7 +112,7 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
             } else { panels.hideForWorkspace() }
         } catch {
             guard session == token else { return }
-            stopVoice(); panels.hideOverlay(); paused = false
+            await finishDictation(); panels.hideOverlay(); paused = false
             status = "目标窗口已关闭，已有批阅仍可完成并复制"
             tracking?.invalidate(); panels.showSidebar()
         }
@@ -123,32 +130,46 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
                 let snapshot = ReviewSnapshot(id:UUID(),image:image,png:data,frame:window.frame)
                 snapshots.append(snapshot); current = snapshot; paused = true
                 panels.showOverlay(snapshot); panels.positionSidebar(window.frame)
+                try await persist()
                 status = "拖动框选；点击框选区域可语音批阅"
-            } catch { status = error.localizedDescription }
+            } catch { status = "截图或保存失败：\(error.localizedDescription)，已截取画面仍保留，可重试保存" }
         }
     }
     func addRegion(_ rect: CGRect) {
-        guard paused, let current else { return }
-        stopVoice()
+        guard paused, !busy, let current else { return }
         let item = ReviewRegion(snapshotID:current.id,number:regions.count+1,rect:rect)
         regions.append(item); select(item.id)
-        status = "已框选 #\(item.number)，输入意见或点击麦克风"
+        scheduleSave()
         panels.redraw()
     }
     func select(_ id: UUID, speak: Bool = false) {
+        guard !busy else { return }
         if speak && selectedID == id && voice.dictating { voice.finishVoice(cancel:false); return }
-        stopVoice(); selectedID = id
-        voice.draft = regions.first(where:{$0.id == id})?.feedback ?? ""
-        voice.status = "可输入文字，或点击麦克风录入"
-        panels.redraw()
-        if speak { voice.toggleVoice() }
+        busy = true
+        Task {
+            // Keep selectedID unchanged until every accepted final callback is delivered.
+            await finishDictation()
+            selectedID = id
+            voice.draft = regions.first(where:{$0.id == id})?.feedback ?? ""
+            voice.status = "可输入文字，或点击麦克风录入"
+            if paused, let shotID = regions.first(where:{$0.id == id})?.snapshotID,
+               let shot = snapshots.first(where:{$0.id == shotID}), current?.id != shotID {
+                current = shot; panels.showOverlay(shot)
+            }
+            busy = false; panels.redraw()
+            if speak { voice.toggleVoice() }
+        }
     }
     func stopVoice() { voice.finishVoice(cancel:true) }
-    private func finishDictation() async {
-        if voice.dictating { voice.finishVoice(cancel:false) }
-        let deadline = Date().addingTimeInterval(3)
-        while voice.voiceFinishing && Date() < deadline { try? await Task.sleep(nanoseconds:100_000_000) }
-        stopVoice()
+    private func finishDictation() async { await voice.finishAndWait() }
+    private func scheduleSave() {
+        autosave?.cancel()
+        guard active, !snapshots.isEmpty else { return }
+        autosave = Task {
+            do { try await Task.sleep(nanoseconds:400_000_000); try Task.checkCancellation(); try await persist() }
+            catch is CancellationError { }
+            catch { status = "自动保存失败：\(error.localizedDescription)，请重试保存后关闭" }
+        }
     }
     func resume() {
         guard paused, !busy else { return }
@@ -159,7 +180,7 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
             await finishDictation()
             guard token == session else { return }
             defer { busy = false }
-            do { try persist(); panels.hideOverlay(); paused = false; status = "已保存批阅，可继续操作应用；暂停可批阅下一张画面" }
+            do { try await persist(); panels.hideOverlay(); paused = false; status = "已保存批阅，可继续操作应用；暂停可批阅下一张画面" }
             catch { status = "保存失败：\(error.localizedDescription)，批阅仍保留，请重试" }
         }
     }
@@ -173,36 +194,63 @@ func reviewScreenRect(_ frame: CGRect, desktopTop: CGFloat) -> CGRect {
             guard token == session else { return }
             defer { busy = false }
             do {
-                try persist()
+                try await persist()
                 try copyReview(target:target?.label ?? "窗口批阅",regions:regions,snapshots:snapshots)
                 copied = true; paused = false; panels.hideOverlay()
                 status = "已复制全部图片和评审意见，可直接粘贴"
                 onNotice?("批阅已复制：\(snapshots.count) 张画面，\(regions.count) 条意见")
-            } catch { status = "复制失败：\(error.localizedDescription)，记录已保留" }
+            } catch { status = "保存或复制失败：\(error.localizedDescription)，内容仍在当前会话中，请重试" }
         }
     }
-    func persist() throws {
+    func persist() async throws {
         guard !snapshots.isEmpty else { return }
         if saveFolder == nil {
-            let root = try FileManager.default.url(for:.applicationSupportDirectory,in:.userDomainMask,appropriateFor:nil,create:true).appendingPathComponent("DuckIsland/Reviews")
             let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-            let folder = root.appendingPathComponent(formatter.string(from:Date()) + "-" + UUID().uuidString.prefix(6))
-            try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
-            saveFolder = folder
+            saveFolder = try (storageRoot ?? ReviewStore.defaultRoot()).appendingPathComponent(formatter.string(from:Date()) + "-" + UUID().uuidString)
         }
-        guard let folder = saveFolder else { return }
-        for (index, shot) in snapshots.enumerated() {
-            let marked = annotatedReviewImage(shot,regions:regions.filter{$0.snapshotID == shot.id})
-            try reviewPNG(marked).write(to:folder.appendingPathComponent(String(format:"%02d",index+1)+"-"+shot.id.uuidString+".png"),options:.atomic)
+        let session = StoredReviewSession(target:target,shots:snapshots.map { StoredReviewShot(id:$0.id,frame:$0.frame) },regions:regions,selectedID:selectedID)
+        let payload = ReviewSavePayload(session:session,originals:Dictionary(uniqueKeysWithValues:snapshots.map { ($0.id,$0.png) }),text:reviewPlainText(target:target?.label ?? "窗口批阅",regions:regions,snapshots:snapshots))
+        try await store.save(payload,folder:saveFolder!)
+    }
+    func restoreLatest() {
+        guard !busy, let folder = recoveryFolder else { return }
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                try await restore(folder:folder)
+            } catch { status = "恢复失败：\(error.localizedDescription)。原文件未修改" }
         }
-        try JSONEncoder().encode(regions).write(to:folder.appendingPathComponent("regions.json"),options:.atomic)
-        try reviewPlainText(target:target?.label ?? "窗口批阅",regions:regions,snapshots:snapshots).write(to:folder.appendingPathComponent("review.txt"),atomically:true,encoding:.utf8)
+    }
+    func restore(folder: URL, presentPanels: Bool = true) async throws {
+        let payload = try await store.load(folder:folder)
+        let restored = try payload.session.shots.map { shot -> ReviewSnapshot in
+            guard let data = payload.originals[shot.id], let image = NSImage(data:data) else { throw NotesFailure(detail:"批阅原图无法恢复") }
+            return ReviewSnapshot(id:shot.id,image:image,png:data,frame:shot.frame)
+        }
+        token = UUID(); tracking?.invalidate(); tracking = nil
+        snapshots = restored; regions = payload.session.regions; target = payload.session.target
+        selectedID = payload.session.selectedID; saveFolder = folder
+        let selectedShot = regions.first(where:{$0.id == selectedID})?.snapshotID
+        current = restored.first(where:{$0.id == selectedShot}) ?? restored.last
+        active = true; picking = false; paused = true
+        if presentPanels { panels.clearHighlights() }
+        voice.draft = regions.first(where:{$0.id == selectedID})?.feedback ?? ""
+        if presentPanels, let current { panels.showOverlay(current); panels.positionSidebar(current.frame) }
+        status = "已恢复批阅，可继续编辑意见并完成复制；原窗口可能已关闭"
     }
     func reveal() { if let saveFolder { NSWorkspace.shared.activateFileViewerSelecting([saveFolder]) } }
-    func close() {
-        stopVoice()
-        do { try persist() } catch { status = "保存失败，请重试后关闭：\(error.localizedDescription)"; return }
+    func close() { Task { _ = await closeForTermination() } }
+    func closeForTermination() async -> Bool {
+        guard !busy else { return false }
+        busy = true
+        autosave?.cancel()
+        await finishDictation()
+        autosave?.cancel() // The final transcript may have scheduled another debounce.
+        do { try await persist() }
+        catch { busy = false; status = "保存失败，请重试后关闭：\(error.localizedDescription)"; return false }
         token = UUID(); tracking?.invalidate(); tracking = nil
         panels.close(); active = false; picking = false; paused = false; busy = false; target = nil
+        return true
     }
 }

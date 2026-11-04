@@ -126,6 +126,9 @@ struct ReviewSidebar:View {
                 Button { model.close() } label:{Image(systemName:"xmark")}.help("保存并关闭批阅")
             }
             Text(model.target?.label ?? "选择一个窗口").font(.system(size:11)).foregroundStyle(.secondary).lineLimit(2)
+            if model.recoveryFolder != nil && model.snapshots.isEmpty {
+                Button("恢复最近一次批阅") { model.restoreLatest() }.disabled(model.busy)
+            }
             if model.picking {
                 ScrollView {
                     VStack(alignment:.leading,spacing:6) {
@@ -207,7 +210,7 @@ struct ReviewSidebar:View {
                         Text("#\(region.number) 评审意见").font(.system(size:11,weight:.medium))
                         Spacer()
                         Button { voice.toggleVoice() } label:{Image(systemName:voice.dictating ? "stop.circle.fill" : "mic.fill").foregroundStyle(voice.dictating ? .red : .yellow)}
-                            .disabled(voice.voicePreparing || voice.voiceFinishing).help(voice.dictating ? "结束语音" : "语音评审意见")
+                            .disabled(model.busy || voice.voicePreparing || voice.voiceFinishing).help(voice.dictating ? "结束语音" : "语音评审意见")
                     }
                     TextEditor(text:$voice.draft).font(.system(size:12)).frame(height:65).scrollContentBackground(.hidden)
                         .padding(5).background(.white.opacity(0.07),in:RoundedRectangle(cornerRadius:7)).disabled(voice.voiceActive)

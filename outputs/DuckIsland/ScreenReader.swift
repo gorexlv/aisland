@@ -79,7 +79,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
             defer { if session == token { busy = false } }
             do {
                 let window = try await resolveScreenWindow(target)
-                let (data, _) = try await captureScreenWindow(target)
+                let (data, _) = try await captureScreenWindow(target,purpose:.ocr)
                 guard session == token, let image = NSImage(data:data) else { return }
                 let frame = reviewScreenRect(window.frame,desktopTop:NSScreen.screens.first?.frame.maxY ?? 0)
                 let panel = IslandPanel(contentRect:frame,styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
