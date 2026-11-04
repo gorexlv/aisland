@@ -130,8 +130,8 @@ func sentenceCount(_ text: String) -> Int {
                 audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
                 savedNoteName = ""; savedNoteFolder = ""; noteID = nil; analysisText = ""; analysisError = ""
                 let newCapture = MeetingCapture()
-                newCapture.onSample = { [weak self] sample, source in
-                    DispatchQueue.main.async { self?.recognition.append(sample, source: source) }
+                newCapture.onSample = { [recognition] sample, source in
+                    recognition.append(sample, source: source)
                 }
                 newCapture.onFailure = { [weak self] error in
                     DispatchQueue.main.async {
@@ -174,12 +174,15 @@ func sentenceCount(_ text: String) -> Int {
         }
         capture = nil; recording = false; level = 0
         recognition.finish()
-        let deadline = Date().addingTimeInterval(120)
-        while recognition.pending && Date() < deadline {
+        // Bounded admission and per-chunk deadlines bound the drain duration.
+        while recognition.pending {
             message = "正在完成转写 · 剩余 \(recognition.pendingCount) 个音频片段…"
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
-        if recognition.pending { warning = "部分片段转写超时，以下是已经完成的记录。" }
+        transcript = recognition.finalText()
+        if recognition.isIncomplete {
+            warning = ([warning, "转写不完整：部分音频未能完成识别，原音未保存，无法恢复。"].filter { !$0.isEmpty }).joined(separator: "；")
+        }
         persist()
         let emptyReason = recognition.emptyResultReason
         let diagnostics = recognition.diagnosticSummary
@@ -221,10 +224,10 @@ func sentenceCount(_ text: String) -> Int {
                     noteID = receipt.id; savedNoteName = receipt.name; savedNoteFolder = receipt.folder
                     noteSaved = true
                 }
-                message = result.error ?? (result.analysisError.isEmpty ? "会议已保存" : "原文已保存；总结失败，可重试")
+                message = result.error ?? (jobWarning.isEmpty ? (result.analysisError.isEmpty ? "会议已保存" : "原文已保存；总结失败，可重试") : "会议已保存，但转写不完整；请查看记录中的警告")
             }
             if let receipt = result.receipt {
-                notify((result.analysisError.isEmpty ? "已保存：" : "原文已保存（总结失败）：") + receipt.name)
+                notify((!jobWarning.isEmpty ? "已保存（转写不完整）：" : (result.analysisError.isEmpty ? "已保存：" : "原文已保存（总结失败）：")) + receipt.name)
             } else {
                 notify("保存失败，文字已保留在本地备份")
             }
