@@ -13,6 +13,7 @@ func sentenceCount(_ text: String) -> Int {
     let screenReader = ScreenReader()
     let review = ReviewModel()
     private var screenChanges: AnyCancellable?
+    var terminationRequested = false
     @Published var recording = false
     @Published var audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
     @Published var busy = false
@@ -31,8 +32,10 @@ func sentenceCount(_ text: String) -> Int {
     @Published var processing = false
     private var toastToken = UUID()
     private var sessionID = UUID()
-    private var jobs: Set<UUID> = []
-    var hasBackgroundJobs: Bool { !jobs.isEmpty }
+    private let saveJobs = MeetingSaveJobs()
+    private let backupWriter = MeetingBackupWriter()
+    @Published var localBackupSaved = false
+    var hasBackgroundJobs: Bool { saveJobs.pending || backupWriter.pending }
     private var noteID: String?
     @Published var notchWidth: CGFloat = 220
     @Published var notchHeight: CGFloat = 38
@@ -72,6 +75,7 @@ func sentenceCount(_ text: String) -> Int {
         expanded = showMenu || !transcript.isEmpty
     }
     func startReview() {
+        guard !terminationRequested else { return }
         guard !recording, !busy else { notify("请先结束会议，再开启批阅"); return }
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
         review.start()
@@ -82,6 +86,7 @@ func sentenceCount(_ text: String) -> Int {
         showMenu = false; expanded = false; screenReader.open()
     }
     func meeting() {
+        guard !terminationRequested else { return }
         guard !review.active else { notify("请先关闭批阅"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
@@ -126,7 +131,7 @@ func sentenceCount(_ text: String) -> Int {
                 let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("DuckIsland/Meetings", isDirectory: true)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 backupURL = folder.appendingPathComponent(title.replacingOccurrences(of: ":", with: "-") + "-" + UUID().uuidString.prefix(6) + ".txt")
-                transcript = ""; noteSaved = false; warning = ""
+                transcript = ""; noteSaved = false; localBackupSaved = false; warning = ""
                 audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
                 savedNoteName = ""; savedNoteFolder = ""; noteID = nil; analysisText = ""; analysisError = ""
                 let newCapture = MeetingCapture()
@@ -206,31 +211,41 @@ func sentenceCount(_ text: String) -> Int {
         let jobID = sessionID
         let input = transcript, jobTitle = title, url = backupURL, existingID = noteID
         let jobWarning = warning, previousAnalysis = analysisText, previousError = analysisError
-        processing = true; jobs.insert(jobID)
+        let cancellation = saveJobs.begin(jobID, text: jobTitle + "\n\n" + noteBody)
+        let writer = backupWriter
+        processing = true
         expanded = false; showMenu = false
         message = "会议正在后台整理和保存"
         Task { @MainActor in
             let result = await Task.detached(priority: .utility) { () -> BackgroundSaveResult in
                 finishMeetingInBackground(title: jobTitle, transcript: input, warning: jobWarning,
                     backupURL: url, existingID: existingID, analyze: analyze,
-                    previousAnalysis: previousAnalysis, previousError: previousError)
+                    previousAnalysis: previousAnalysis, previousError: previousError,
+                    analyzer: { text in
+                        #if APP_STORE
+                        return ""
+                        #else
+                        return try analyzeMeeting(text, cancellation: cancellation).rendered
+                        #endif
+                    },
+                    exporter: { try insertIntoNotesInBackground(title: $0, text: $1, existingID: $2, cancellation: cancellation) },
+                    backupWriter: { try writer.writeFinal($0, to: $1) })
             }.value
-            jobs.remove(jobID)
+            saveJobs.complete(jobID, result: result)
             if sessionID == jobID {
                 processing = false
                 analysisText = result.analysis
                 analysisError = result.analysisError
+                localBackupSaved = result.localBackup.succeeded
                 if let receipt = result.receipt {
                     noteID = receipt.id; savedNoteName = receipt.name; savedNoteFolder = receipt.folder
                     noteSaved = true
                 }
-                message = result.error ?? (jobWarning.isEmpty ? (result.analysisError.isEmpty ? "会议已保存" : "原文已保存；总结失败，可重试") : "会议已保存，但转写不完整；请查看记录中的警告")
+                message = result.statusMessage + (jobWarning.isEmpty ? "" : "；转写不完整，请查看记录中的警告")
+                if case .failed(let detail) = result.localBackup { message += "：" + detail }
+                if let error = result.error { message += "；" + error }
             }
-            if let receipt = result.receipt {
-                notify((!jobWarning.isEmpty ? "已保存（转写不完整）：" : (result.analysisError.isEmpty ? "已保存：" : "原文已保存（总结失败）：")) + receipt.name)
-            } else {
-                notify("保存失败，文字已保留在本地备份")
-            }
+            if sessionID == jobID { notify(message) }
         }
     }
     @MainActor func notify(_ text: String) {
@@ -251,16 +266,80 @@ func sentenceCount(_ text: String) -> Int {
     }
     func openSavedNote() { if let noteID { openNote(id: noteID) } }
     private func persist() {
-        guard let backupURL else { return }
-        do { try (title + "\n\n" + (analysisText.isEmpty && analysisError.isEmpty ? transcript : noteBody)).write(to: backupURL, atomically: true, encoding: .utf8) }
-        catch { message = "本地文字备份失败：\(error.localizedDescription)" }
+        guard !processing, let backupURL else { return }
+        let id = sessionID
+        let text = title + "\n\n" + (analysisText.isEmpty && analysisError.isEmpty ? transcript : noteBody)
+        saveJobs.retain(id, text: text)
+        backupWriter.write(text, to: backupURL) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                if case .success = result { self.saveJobs.recovered(id, text: text) }
+                guard self.sessionID == id else { return }
+                switch result {
+                case .success:
+                    self.localBackupSaved = true
+                case .failure(let error):
+                    self.localBackupSaved = false
+                    self.message = "本地文字备份失败，请复制文字或重试：" + error.localizedDescription
+                }
+            }
+        }
+    }
+    // Wait only a bounded period. Cancellation reaches both CLI and Notes helper.
+    // If a disk operation has not returned or no durable copy exists, keep the app
+    // open with recovery text rather than silently losing an older meeting.
+    func finishSavesForTermination(timeout: TimeInterval = 12) async -> Bool {
+        guard await saveJobs.waitForCompletion(timeout: timeout, pendingBackup: { backupWriter.pending }) else {
+            notify("保存尚未结束，已取消退出；请稍后重试")
+            return false
+        }
+        if !saveJobs.recoveryText.isEmpty {
+            recoverUnsavedMeetings()
+            return false
+        }
+        return true
+    }
+    func recoverUnsavedMeetings() {
+        let snapshots = saveJobs.unsaved
+        let text = saveJobs.recoveryText
+        guard !text.isEmpty else { notify("没有未保存的会议"); return }
+        let alert = NSAlert()
+        alert.messageText = "恢复未保存的会议"
+        alert.informativeText = "有 \(snapshots.count) 份会议尚无已确认副本。另存成功后即可退出；复制只用于取回文字，不会标记为已保存。"
+        alert.addButton(withTitle: "另存文字")
+        alert.addButton(withTitle: "复制文字")
+        alert.addButton(withTitle: "返回")
+        let choice = alert.runModal()
+        if choice == .alertSecondButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            notify("已复制未保存会议；请另存或重试保存")
+        } else if choice == .alertFirstButtonReturn {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "未保存会议恢复.txt"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            backupWriter.write(text, to: url) { [weak self] result in
+                if accessed { url.stopAccessingSecurityScopedResource() }
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch result {
+                    case .success:
+                        for (id, snapshot) in snapshots where self.saveJobs.unsaved[id] == snapshot { self.saveJobs.recovered(id) }
+                        self.notify("恢复文字已另存")
+                    case .failure(let error): self.notify("另存失败：" + error.localizedDescription)
+                    }
+                }
+            }
+        }
     }
     func saveToNotes() {
-        guard !noteSaved, !busy, !recording else { return }
+        guard (!noteSaved || !localBackupSaved), !busy, !recording else { return }
         Task { @MainActor in enqueueSave(analyze: false) }
     }
     func revealBackup() {
-        if let backupURL { NSWorkspace.shared.activateFileViewerSelecting([backupURL]) }
+        if localBackupSaved, let backupURL { NSWorkspace.shared.activateFileViewerSelecting([backupURL]) }
+        else { persist(); notify("正在重试本地备份；也可复制文字") }
     }
     func copy() {
         NSPasteboard.general.clearContents()
@@ -390,14 +469,14 @@ struct IslandView: View {
                         }.buttonStyle(.plain).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 10)
                     }
                     HStack {
-                        Button(model.noteSaved ? "已写入备忘录" : "写入备忘录") { model.saveToNotes() }.disabled(model.noteSaved)
+                        Button(model.noteSaved ? (model.localBackupSaved ? "已写入备忘录" : "重试保存") : "写入备忘录") { model.saveToNotes() }.disabled(model.noteSaved && model.localBackupSaved)
                         #if !APP_STORE
                         if !model.analysisError.isEmpty {
                             Button("重试总结") { model.retryAnalysis() }.help(model.analysisError)
                         }
                         #endif
                         Spacer()
-                        Button("本地文字备份") { model.revealBackup() }
+                        Button(model.localBackupSaved ? "本地文字备份" : "重试本地备份") { model.revealBackup() }
                     }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 12)
                 }
                 HStack(spacing: 7) {
@@ -501,6 +580,7 @@ final class IslandPanel: NSPanel {
         menu.addItem(withTitle:"隐私与使用说明",action:#selector(showPrivacy),keyEquivalent:"")
         menu.addItem(withTitle:"查看本地记录",action:#selector(showRecords),keyEquivalent:"")
         #endif
+        menu.addItem(withTitle: "恢复未保存会议", action: #selector(recoverMeetings), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "退出", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
@@ -538,28 +618,42 @@ final class IslandPanel: NSPanel {
         } catch { model.notify("无法打开记录目录：" + error.localizedDescription) }
     }
     #endif
+    @objc func recoverMeetings() { model.recoverUnsavedMeetings() }
     @objc func quit() { NSApp.terminate(nil) }
+    private var terminating = false
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        model.review.close()
-        if model.review.active { return .terminateCancel }
-        model.screenReader.cancel(); model.screenReader.hide()
-        if model.recording && !model.busy {
-            Task { @MainActor in
-                await model.stopMeeting()
-                while model.hasBackgroundJobs { try? await Task.sleep(nanoseconds: 200_000_000) }
-                sender.reply(toApplicationShouldTerminate: true)
+        if terminating { return .terminateLater }
+        if model.busy { return .terminateCancel }
+        terminating = true
+        model.terminationRequested = true
+        Task { @MainActor in
+            defer { model.terminationRequested = false }
+            // C integration: replace close()/active guard below with
+            // guard await model.review.closeForTermination() else { ... reply(false); return }.
+            // Do not invoke close() first: C must await voice and persistence.
+            model.review.close()
+            guard !model.review.active else {
+                terminating = false; sender.reply(toApplicationShouldTerminate: false); return
             }
-            return .terminateLater
-        }
-        if model.hasBackgroundJobs {
-            Task { @MainActor in
-                while model.hasBackgroundJobs { try? await Task.sleep(nanoseconds: 200_000_000) }
-                sender.reply(toApplicationShouldTerminate: true)
+            model.screenReader.cancel(); model.screenReader.hide()
+            let deadline = ProcessInfo.processInfo.systemUptime + 12
+            if model.recording {
+                let stopped = await waitForSaveOperation(timeout: 12) { [self] in
+                    await model.stopMeeting()
+                    return true
+                }
+                guard stopped else {
+                    model.notify("录音收尾尚未结束，已取消退出；请稍后重试")
+                    terminating = false; sender.reply(toApplicationShouldTerminate: false); return
+                }
             }
-            return .terminateLater
+            let canQuit = await model.finishSavesForTermination(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime))
+            terminating = false
+            sender.reply(toApplicationShouldTerminate: canQuit)
         }
-        return model.busy ? .terminateCancel : .terminateNow
+        return .terminateLater
     }
+
 }
 #if APP_STORE && !DEBUG
 let app = NSApplication.shared

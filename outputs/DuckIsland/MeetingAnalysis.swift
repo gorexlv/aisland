@@ -31,7 +31,7 @@ let meetingAnalysisSchema = #"""
 {"type":"object","additionalProperties":false,"required":["summary","decisions","tickets","questions"],"properties":{"summary":{"type":"string"},"decisions":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"string"}},"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["title","action","owner","due","acceptance","evidence"],"properties":{"title":{"type":"string"},"action":{"type":"string"},"owner":{"type":"string"},"due":{"type":"string"},"acceptance":{"type":"string"},"evidence":{"type":"string"}}}}}}
 """#
 
-func analyzeMeeting(_ transcript: String) throws -> MeetingAnalysis {
+func analyzeMeeting(_ transcript: String, cancellation: SaveCancellation? = nil) throws -> MeetingAnalysis {
     let manager = FileManager.default
     let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", manager.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path, "/Applications/Codex.app/Contents/Resources/codex"]
     guard let binary = candidates.first(where: { manager.isExecutableFile(atPath: $0) }) else {
@@ -69,18 +69,7 @@ func analyzeMeeting(_ transcript: String) throws -> MeetingAnalysis {
     environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     process.environment = environment
     process.standardInput = input; process.standardOutput = log; process.standardError = log
-    try process.run()
-    let deadline = Date().addingTimeInterval(180)
-    while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-    if process.isRunning {
-        process.terminate()
-        let stopDeadline = Date().addingTimeInterval(3)
-        while process.isRunning && Date() < stopDeadline { Thread.sleep(forTimeInterval: 0.1) }
-        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
-        process.waitUntilExit()
-        throw NotesFailure(detail: "Codex 总结超过 3 分钟，原文已保留，可稍后重试总结。")
-    }
-    process.waitUntilExit()
+    try runBoundedProcess(process, timeout: 180, cancellation: cancellation)
     guard process.terminationStatus == 0 else {
         throw NotesFailure(detail: "Codex CLI 未完成（退出码 \(process.terminationStatus)）。请检查网络及 codex login 登录状态，原文已保留。")
     }
