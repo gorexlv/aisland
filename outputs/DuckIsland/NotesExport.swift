@@ -208,6 +208,13 @@ struct BackgroundSaveResult {
     let localBackup: LocalBackupState
     var recoveryText: String = ""
     var hasDurableCopy: Bool { localBackup.succeeded || receipt != nil }
+    func presentationMessage(warning: String) -> String {
+        var message = statusMessage
+        if !warning.isEmpty { message += "；转写不完整，请查看记录中的警告" }
+        if case .failed(let detail) = localBackup { message += "：" + detail }
+        if let error { message += "；" + error }
+        return message
+    }
     var statusMessage: String {
         switch (localBackup.succeeded, receipt != nil) {
         case (true, true): return analysisError.isEmpty ? "会议已保存" : "原文已保存；总结失败，可重试"

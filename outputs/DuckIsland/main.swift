@@ -11,7 +11,7 @@ func sentenceCount(_ text: String) -> Int {
 
 @MainActor final class Recorder: ObservableObject {
     let screenReader = ScreenReader()
-    let review = ReviewModel()
+    let review: ReviewModel
     private var screenChanges: AnyCancellable?
     var terminationRequested = false
     @Published var recording = false
@@ -40,16 +40,18 @@ func sentenceCount(_ text: String) -> Int {
     @Published var notchWidth: CGFloat = 220
     @Published var notchHeight: CGFloat = 38
     private var capture: MeetingCapture?
-    private let recognition = MeetingRecognition()
+    private let recognition: MeetingRecognition
     private var title = ""
     private var backupURL: URL?
     private var lastBackup = Date.distantPast
     private var warning = ""
     var count: Int { sentenceCount(transcript) }
 
-    init() {
+    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil) {
+        self.recognition = recognition
+        self.review = review ?? ReviewModel()
         screenReader.onNotice = { [weak self] text in self?.notify(text) }
-        review.onNotice = { [weak self] text in self?.notify(text) }
+        self.review.onNotice = { [weak self] text in self?.notify(text) }
         screenChanges = screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         recognition.onAudioStatus = { [weak self] status in self?.audioStatus = status }
         recognition.onText = { [weak self] text in
@@ -179,7 +181,8 @@ func sentenceCount(_ text: String) -> Int {
         }
         capture = nil; recording = false; level = 0
         recognition.finish()
-        // Bounded admission and per-chunk deadlines bound the drain duration.
+        // Admission is bounded; framework calls may still delay deadline handling.
+        // A quit timeout leaves this task running so accepted audio can drain.
         while recognition.pending {
             message = "正在完成转写 · 剩余 \(recognition.pendingCount) 个音频片段…"
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -241,9 +244,7 @@ func sentenceCount(_ text: String) -> Int {
                     noteID = receipt.id; savedNoteName = receipt.name; savedNoteFolder = receipt.folder
                     noteSaved = true
                 }
-                message = result.statusMessage + (jobWarning.isEmpty ? "" : "；转写不完整，请查看记录中的警告")
-                if case .failed(let detail) = result.localBackup { message += "：" + detail }
-                if let error = result.error { message += "；" + error }
+                message = result.presentationMessage(warning: jobWarning)
             }
             if sessionID == jobID { notify(message) }
         }
@@ -268,7 +269,7 @@ func sentenceCount(_ text: String) -> Int {
     private func persist() {
         guard !processing, let backupURL else { return }
         let id = sessionID
-        let text = title + "\n\n" + (analysisText.isEmpty && analysisError.isEmpty ? transcript : noteBody)
+        let text = title + "\n\n" + noteBody
         saveJobs.retain(id, text: text)
         backupWriter.write(text, to: backupURL) { [weak self] result in
             Task { @MainActor in
@@ -547,7 +548,9 @@ final class IslandPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
-    let model = Recorder()
+    let model: Recorder
+    override init() { model = Recorder(); super.init() }
+    init(model: Recorder) { self.model = model; super.init() }
     var panel: IslandPanel!
     var statusItem: NSStatusItem!
     var expansion: AnyCancellable?
@@ -622,34 +625,34 @@ final class IslandPanel: NSPanel {
     @objc func quit() { NSApp.terminate(nil) }
     private var terminating = false
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        requestTermination { sender.reply(toApplicationShouldTerminate: $0) }
+    }
+    // Shared with isolated lifecycle tests; reply remains owned by AppKit in production.
+    func requestTermination(timeout: TimeInterval = 12, reply: @escaping (Bool) -> Void) -> NSApplication.TerminateReply {
         if terminating { return .terminateLater }
         if model.busy { return .terminateCancel }
         terminating = true
         model.terminationRequested = true
         Task { @MainActor in
             defer { model.terminationRequested = false }
-            // C integration: replace close()/active guard below with
-            // guard await model.review.closeForTermination() else { ... reply(false); return }.
-            // Do not invoke close() first: C must await voice and persistence.
-            model.review.close()
-            guard !model.review.active else {
-                terminating = false; sender.reply(toApplicationShouldTerminate: false); return
+            guard await model.review.closeForTermination() else {
+                terminating = false; reply(false); return
             }
             model.screenReader.cancel(); model.screenReader.hide()
-            let deadline = ProcessInfo.processInfo.systemUptime + 12
+            let deadline = ProcessInfo.processInfo.systemUptime + timeout
             if model.recording {
-                let stopped = await waitForSaveOperation(timeout: 12) { [self] in
+                let stopped = await waitForSaveOperation(timeout: timeout) { [self] in
                     await model.stopMeeting()
                     return true
                 }
                 guard stopped else {
                     model.notify("录音收尾尚未结束，已取消退出；请稍后重试")
-                    terminating = false; sender.reply(toApplicationShouldTerminate: false); return
+                    terminating = false; reply(false); return
                 }
             }
             let canQuit = await model.finishSavesForTermination(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime))
             terminating = false
-            sender.reply(toApplicationShouldTerminate: canQuit)
+            reply(canQuit)
         }
         return .terminateLater
     }
