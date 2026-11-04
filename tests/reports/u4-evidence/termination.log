@@ -1,0 +1,2 @@
+PASS: recognition partial/deadline warning survives final disk/Notes fixture saves and honest disk-failure status
+PASS: actual delegate + Recorder + recognition + review: voice/disk failure refuses quit; retry saves final voice; quit timeout preserves accepted drain; duplicate/busy quit does not restart stop; later quit succeeds

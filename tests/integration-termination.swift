@@ -67,9 +67,21 @@ func sample() -> CMSampleBuffer {
         try recognition.start()
         recognition.append(sample(), source: .system)
         recognition.append(sample(), source: .microphone)
-        let recorder = Recorder(recognition: recognition, review: review)
+        let ocrRoot = root.appendingPathComponent("ocr-blocked")
+        try Data().write(to: ocrRoot)
+        let ocr = ScreenReader(storageRoot: ocrRoot)
+        ocr.accept(ScreenReadResult(text: "Fixture OCR", image: try reviewPNG(image)),
+            target: ScreenTarget(id: 42, pid: 123, app: "Fixture", bundleID: "fixture", title: "Fixture window"), region: .zero)
+        ocr.text = "Edited fixture OCR"
+        let recorder = Recorder(recognition: recognition, review: review, screenReader: ocr)
         recorder.recording = true
         let delegate = AppDelegate(model: recorder)
+        var ocrReplies: [Bool] = []
+        precondition(delegate.requestTermination(reply: { ocrReplies.append($0) }) == .terminateLater)
+        try await until { !ocrReplies.isEmpty }
+        precondition(ocrReplies == [false] && recorder.recording && review.active && review.voice.dictating)
+        precondition(ocr.dirty && !recorder.terminationRequested && fake.cancellations == 0)
+        try FileManager.default.removeItem(at: ocrRoot)
         var replies: [Bool] = []
         precondition(delegate.requestTermination(timeout: 0.05, reply: { replies.append($0) }) == .terminateLater)
         try await until { review.voice.voiceFinishing }
@@ -100,6 +112,9 @@ func sample() -> CMSampleBuffer {
         precondition(delegate.requestTermination(timeout: 0.2, reply: { replies.append($0) }) == .terminateLater)
         try await until { replies.count == 3 }
         precondition(replies == [false, false, true] && !recorder.terminationRequested && fake.count == 2)
+        precondition(!ocr.dirty)
+        let ocrText = try String(contentsOf: ocr.savedFile!, encoding: .utf8)
+        precondition(ocrText == "Edited fixture OCR")
         // A's timeout marker/partial text survives B's final save and independent outcomes.
         let partialDriver = FakeRecognizer()
         var limits = MeetingRecognition.Limits(); limits.finalTimeout = 0.03

@@ -3,7 +3,7 @@ import Cocoa
 @MainActor func runWorkflowChecks() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at:root) }
-    let reader = ScreenReader(storageRoot:root)
+    let reader = ScreenReader(storageRoot:root.appendingPathComponent("ScreenReads"))
     let image = NSImage(size:NSSize(width:20,height:10),flipped:false) { r in NSColor.white.setFill(); r.fill(); return true }
     let png = try reviewPNG(image)
     let target = ScreenTarget(id:42,pid:123,app:"Fixture",bundleID:"test.fixture",title:"Fake window")
@@ -31,12 +31,19 @@ import Cocoa
     let saved = reader.savedFile!
     let storedText = try String(contentsOf:saved,encoding:.utf8)
     assert(storedText == reader.text)
+    let history = try RecentRecords.load(root: root)
+    assert(history.contains { $0.kind == "OCR" && $0.text == "Edited fixture 中文" })
     let storedImage = try Data(contentsOf:saved.deletingLastPathComponent().appendingPathComponent("region.png"))
     assert(storedImage == png)
     let metadata = try JSONDecoder().decode([String:String].self,from:Data(contentsOf:saved.deletingLastPathComponent().appendingPathComponent("source.json")))
     assert(metadata["窗口"] == "Fake window" && metadata["框选范围"] == "\(region)")
     reader.accept(result,target:target,region:region,choice:.keep) // Saved content does not prompt.
     assert(reader.text == result.text)
+    let displayReader = ScreenReader(storageRoot: root.appendingPathComponent("ScreenReads"))
+    displayReader.accept(result, target: ScreenTarget(id:77,pid:0,app:"屏幕框选",bundleID:"",title:"Fixture display"), region:region)
+    displayReader.text = "Edited display fixture"; displayReader.save()
+    let displayMetadata = try JSONDecoder().decode([String:String].self,from:Data(contentsOf:displayReader.savedFile!.deletingLastPathComponent().appendingPathComponent("source.json")))
+    assert(displayMetadata["应用"] == "屏幕框选" && displayMetadata["窗口"] == "Fixture display" && displayMetadata["框选范围"] == "\(region)")
     let blockedRoot = root.appendingPathComponent("file")
     try Data().write(to:blockedRoot)
     let failed = ScreenReader(storageRoot:blockedRoot)
@@ -77,7 +84,7 @@ import Cocoa
     for frame in [CGRect(x:-1920,y:0,width:1920,height:1080),CGRect(x:0,y:1080,width:2560,height:1440)] {
         assert(displayRegionRect(CGRect(x:0,y:0,width:1,height:1),size:frame.size).size == frame.size)
     }
-    let fixtureReader = ScreenReader(storageRoot:root)
+    let fixtureReader = ScreenReader(storageRoot:root.appendingPathComponent("ScreenReads"))
     fixtureReader.loadTargets = { [] }
     let recorder = Recorder(screenReader:fixtureReader)
     recorder.recording = true; recorder.transcript = "Ongoing fixture meeting"

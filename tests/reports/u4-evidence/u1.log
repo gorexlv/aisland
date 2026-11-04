@@ -1,0 +1,1 @@
+PASS: menu/start/stop idempotence, selection speech barrier, delete/undo, persistence/empty recovery, failed close retention

@@ -1,7 +1,16 @@
+extension Recorder {
+    func checkWarningCopy() {
+        let clipboard = NSPasteboard.withUniqueName()
+        defer { clipboard.releaseGlobally() }
+        transcript = "Fixture partial transcript"; warning = "转写不完整：fixture failure"
+        copy(to: clipboard)
+        precondition(clipboard.string(forType: .string)?.contains(warning) == true && copied)
+    }
+}
 // Appended to the production declarations by run-predictable-actions.sh.
 @MainActor func checkPredictableActions() async throws {
-    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    defer { try? FileManager.default.removeItem(at:root) }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("Reviews")
+    defer { try? FileManager.default.removeItem(at:root.deletingLastPathComponent()) }
     let model = ReviewModel(storageRoot:root)
     let recorder = Recorder(review:model)
     recorder.recording = true
@@ -12,6 +21,7 @@
     let ended = recorder.message
     await recorder.stopMeeting()
     assert(!recorder.recording && recorder.message == ended)
+    recorder.checkWarningCopy()
     let image = NSImage(size:NSSize(width:100,height:100),flipped:false) { rect in NSColor.white.setFill(); rect.fill(); return true }
     let png = try reviewPNG(image)
     let a = ReviewSnapshot(id:UUID(),image:image,png:png,frame:CGRect(x:0,y:0,width:100,height:100))
@@ -52,6 +62,13 @@
     let restored = ReviewModel(storageRoot:root)
     try await restored.restore(folder:folder,presentPanels:false)
     assert(restored.regions.count == 2 && restored.snapshots[0].capturedAt == a.capturedAt)
+    let history = try RecentRecords.load(root: root.deletingLastPathComponent())
+    assert(history.count == 1 && history[0].kind == "批阅" && history[0].text.contains("A final") && history[0].text.contains("B final"))
+    // Old version-1 manifests without optional capture time remain decodable.
+    var legacy = try JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("session.json"))) as! [String:Any]
+    legacy["shots"] = (legacy["shots"] as! [[String:Any]]).map { shot in var shot = shot; shot.removeValue(forKey:"capturedAt"); return shot }
+    let decoded = try JSONDecoder().decode(StoredReviewSession.self, from: JSONSerialization.data(withJSONObject: legacy))
+    assert(decoded.shots.allSatisfy { $0.capturedAt == nil })
     restored.paused = false
     await restored.deleteSnapshot(a.id); await restored.deleteSnapshot(b.id)
     let empty = try await store.load(folder:folder)

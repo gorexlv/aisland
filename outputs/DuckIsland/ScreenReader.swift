@@ -233,7 +233,7 @@ struct ScreenReaderView:View {
             HStack {
                 Text("🐨 " + (reader.selected == nil ? "选择读屏窗口" : (reader.resultLabel ?? reader.selected?.label ?? "屏幕框选"))).font(.system(size:12,weight:.medium)).lineLimit(1)
                 Spacer(minLength:0)
-                Button { reader.hide() } label:{Image(systemName:"chevron.up")}.help("收起读屏")
+                Button { reader.hide() } label:{Image(systemName:"chevron.up")}.help("收起读屏").accessibilityLabel("收起读屏面板")
             }
             Button("快捷框选屏幕区域") { reader.captureRegion() }.disabled(reader.busy)
             if reader.selected == nil {

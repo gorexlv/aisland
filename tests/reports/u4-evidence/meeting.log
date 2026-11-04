@@ -1,0 +1,6 @@
+PASS bounded slow dual-source queue, visible overload, accepted tail drain
+PASS exact byte limit, rejected overflow, cancellation releases retained samples
+PASS bounded stop deadlines, partial preservation, timeout markers, no append after stop
+PASS error partials, stale-result/session suppression, coalesced publication, final flush
+PASS dual-source chronological preview/final merge, stale completed-chunk callback
+Meeting recognition deterministic checks passed; no real recognizer/capture/Notes/AI was invoked

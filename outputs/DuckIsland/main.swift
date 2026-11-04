@@ -436,10 +436,10 @@ func sentenceCount(_ text: String) -> Int {
         if localBackupSaved, let backupURL { NSWorkspace.shared.activateFileViewerSelecting([backupURL]) }
         else { persist(); notify("正在重试本地备份；也可复制文字") }
     }
-    func copy() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(transcript, forType: .string)
-        copied = !transcript.isEmpty && NSPasteboard.general.string(forType: .string) == transcript
+    func copy(to pasteboard: NSPasteboard = .general) {
+        let text = transcript + (warning.isEmpty ? "" : "\n\n记录状态：" + warning)
+        pasteboard.clearContents()
+        copied = !transcript.isEmpty && pasteboard.setString(text, forType: .string)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.copied = false }
     }
 }
@@ -599,7 +599,7 @@ struct IslandView: View {
                     Text(model.message).font(.system(size: 10)).foregroundStyle(.gray).lineLimit(3)
                     Spacer()
                     Button(model.copied ? "已复制原文" : "复制原文") { model.copy() }.disabled(model.transcript.isEmpty)
-                    Button { withAnimation { model.expanded = false; model.showMenu = false } } label: { Image(systemName: "chevron.up") }
+                    Button { withAnimation { model.expanded = false; model.showMenu = false } } label: { Image(systemName: "chevron.up") }.accessibilityLabel("收起会议面板")
                 }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 18)
             }
         }
@@ -619,7 +619,7 @@ struct IslandView: View {
         .contextMenu {
             Button(model.showMenu ? "收起功能控制面板" : "打开功能控制面板", action: model.toggle)
             if model.recording { Button("结束会议") { Task { await model.stopMeeting() } }.disabled(model.busy) }
-            Button("复制文字", action: model.copy).disabled(model.transcript.isEmpty)
+            Button("复制原文") { model.copy() }.disabled(model.transcript.isEmpty)
             Divider()
             Button("退出小鸭") { NSApp.terminate(nil) }
         }
