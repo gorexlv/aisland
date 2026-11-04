@@ -29,13 +29,21 @@ func resolveScreenWindow(_ target: ScreenTarget) async throws -> SCWindow {
     }
     return window
 }
-func captureScreenWindow(_ target: ScreenTarget) async throws -> (Data, CGSize) {
+enum ScreenCapturePurpose { case review, ocr }
+func screenCaptureSize(_ size: CGSize, scale: CGFloat, purpose: ScreenCapturePurpose) -> CGSize {
+    let width = max(1, size.width), height = max(1, size.height)
+    let budget: CGFloat = purpose == .ocr ? 12_000_000 : 6_000_000
+    let edge: CGFloat = purpose == .ocr ? 8192 : 4096
+    let ratio = min(max(1,min(scale,2)), sqrt(budget / width / height), edge / max(width,height))
+    return CGSize(width:max(1,floor(width * ratio)),height:max(1,floor(height * ratio)))
+}
+func captureScreenWindow(_ target: ScreenTarget, purpose: ScreenCapturePurpose = .review) async throws -> (Data, CGSize) {
     let window = try await resolveScreenWindow(target)
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let config = SCStreamConfiguration()
-    let ratio = min(1, 1440 / max(window.frame.width, 1))
-    config.width = max(1, Int(window.frame.width * ratio))
-    config.height = max(1, Int(window.frame.height * ratio))
+    let size = screenCaptureSize(window.frame.size,scale:CGFloat(filter.pointPixelScale),purpose:purpose)
+    config.width = Int(size.width)
+    config.height = Int(size.height)
     config.showsCursor = false
     config.ignoreShadowsSingleWindow = true
     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)

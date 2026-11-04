@@ -41,11 +41,7 @@ import AVFoundation
                 speechTask = recognizer.recognitionTask(with:request) { [weak self] result, error in
                     Task { @MainActor in
                         guard let self, token == self.voiceToken else { return }
-                        if let result { self.draft = self.voicePrefix + result.bestTranscription.formattedString }
-                        if result?.isFinal == true || error != nil {
-                            self.finishVoice(cancel:true)
-                            self.status = error == nil ? "语音已转为文字，检查后发送" : "语音识别已结束，可编辑文字后发送"
-                        }
+                        self.receiveTranscript(result?.bestTranscription.formattedString, final:result?.isFinal == true, failed:error != nil)
                     }
                 }
                 engine.prepare(); try engine.start(); dictating = true
@@ -53,6 +49,20 @@ import AVFoundation
                 Task { try? await Task.sleep(nanoseconds:55_000_000_000); if token == self.voiceToken && self.dictating { self.finishVoice(cancel:false) } }
             } catch { finishVoice(cancel:true); status = error.localizedDescription }
         }
+    }
+    // Called only after the recognition callback's session-token check.
+    func receiveTranscript(_ text: String?, final: Bool, failed: Bool) {
+        if let text { draft = voicePrefix + text }
+        if final || failed {
+            finishVoice(cancel:true)
+            status = failed ? "语音识别已结束，可编辑文字后发送" : "语音已转为文字，检查后发送"
+        }
+    }
+    /// Drain the current request before a caller changes the draft's owner.
+    func finishAndWait() async {
+        if voicePreparing { finishVoice(cancel:true); return }
+        if dictating { finishVoice(cancel:false) }
+        while voiceFinishing { try? await Task.sleep(nanoseconds:20_000_000) }
     }
     func finishVoice(cancel: Bool) {
         if let engine { engine.stop(); engine.inputNode.removeTap(onBus:0) }; engine = nil; dictating = false
