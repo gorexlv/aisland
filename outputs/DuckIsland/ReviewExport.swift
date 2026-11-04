@@ -75,6 +75,7 @@ func copyReview(target: String, regions: [ReviewRegion], snapshots: [ReviewSnaps
 struct StoredReviewShot: Codable {
     let id: UUID
     let frame: CGRect
+    var capturedAt: Date? = nil
 }
 struct StoredReviewSession: Codable {
     var version = 1
@@ -121,6 +122,22 @@ actor ReviewStore {
         try JSONEncoder().encode(payload.session.regions).write(to:folder.appendingPathComponent("regions.json"),options:.atomic)
         try payload.text.write(to:folder.appendingPathComponent("review.txt"),atomically:true,encoding:.utf8)
         try JSONEncoder().encode(payload.session).write(to:folder.appendingPathComponent("session.json"),options:.atomic)
+        // After committing the manifest, remove obsolete exported images. Undo retains
+        // original bytes in memory and writes them again through the same transaction.
+        let liveIDs = Set(payload.session.shots.map { $0.id.uuidString })
+        let numbered = Set(payload.session.shots.enumerated().map { String(format:"%02d",$0.offset+1)+"-"+$0.element.id.uuidString+".png" })
+        for url in try fm.contentsOfDirectory(at:folder,includingPropertiesForKeys:nil) {
+            let name = url.lastPathComponent
+            if name.hasPrefix("original-"), name.hasSuffix(".png") {
+                let id = String(name.dropFirst(9).dropLast(4))
+                if UUID(uuidString:id) != nil && !liveIDs.contains(id) { try fm.removeItem(at:url) }
+            } else if name.hasPrefix("geometry-"), name.hasSuffix(".json") {
+                let id = String(name.dropFirst(9).dropLast(5))
+                if UUID(uuidString:id) != nil && !liveIDs.contains(id) { try fm.removeItem(at:url) }
+            } else if name.hasSuffix(".png"), name.count >= 43,
+                      UUID(uuidString:String(name.suffix(40).prefix(36))) != nil,
+                      !numbered.contains(name) { try fm.removeItem(at:url) }
+        }
     }
     func latest(root: URL) throws -> URL? {
         guard FileManager.default.fileExists(atPath:root.path) else { return nil }
@@ -135,7 +152,7 @@ actor ReviewStore {
     func load(folder: URL) throws -> ReviewSavePayload {
         let session = try JSONDecoder().decode(StoredReviewSession.self,from:Data(contentsOf:folder.appendingPathComponent("session.json")))
         let ids = Set(session.shots.map(\.id))
-        guard session.version == 1, !session.shots.isEmpty, ids.count == session.shots.count,
+        guard session.version == 1, ids.count == session.shots.count,
               Set(session.regions.map(\.id)).count == session.regions.count,
               session.selectedID == nil || session.regions.contains(where: { $0.id == session.selectedID }),
               session.regions.allSatisfy({ ids.contains($0.snapshotID) && $0.rect.minX >= 0 && $0.rect.minY >= 0 && $0.rect.maxX <= 1 && $0.rect.maxY <= 1 && $0.rect.width > 0 && $0.rect.height > 0 }) else {

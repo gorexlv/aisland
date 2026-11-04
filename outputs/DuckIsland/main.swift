@@ -15,6 +15,7 @@ func sentenceCount(_ text: String) -> Int {
     private var screenChanges: AnyCancellable?
     var terminationRequested = false
     @Published var recording = false
+    @Published var recordingStartedAt: Date?
     @Published var audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
     @Published var busy = false
     @Published var transcript = ""
@@ -70,9 +71,7 @@ func sentenceCount(_ text: String) -> Int {
         }
     }
     func toggle() {
-        guard !busy else { return }
         screenReader.hide()
-        if recording { Task { @MainActor in await stopMeeting() }; return }
         showMenu.toggle()
         expanded = showMenu || !transcript.isEmpty
     }
@@ -92,7 +91,7 @@ func sentenceCount(_ text: String) -> Int {
         guard !review.active else { notify("请先关闭批阅"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
-        if recording { Task { @MainActor in await stopMeeting() }; return }
+        guard !recording else { showMenu = true; return }
         #if APP_STORE
         if !UserDefaults.standard.bool(forKey:"meetingDisclosureAccepted") {
             let alert = NSAlert()
@@ -149,8 +148,8 @@ func sentenceCount(_ text: String) -> Int {
                 }
                 capture = newCapture
                 try await newCapture.start()
-                recording = true
-                message = "会议中 · 系统声音 + 麦克风 · 再点小鸭结束"
+                recording = true; recordingStartedAt = Date()
+                message = "会议中 · 系统声音 + 麦克风 · 点击「结束会议」结束"
                 persist()
             } catch {
                 if let capture { try? await capture.stop() }
@@ -179,7 +178,7 @@ func sentenceCount(_ text: String) -> Int {
             do { try await capture.stop() }
             catch { warning = "停止音频采集时出错：\(error.localizedDescription)" }
         }
-        capture = nil; recording = false; level = 0
+        capture = nil; recording = false; recordingStartedAt = nil; level = 0
         recognition.finish()
         // Admission is bounded; framework calls may still delay deadline handling.
         // A quit timeout leaves this task running so accepted audio can drain.
@@ -386,6 +385,7 @@ private struct DuckButtonStyle: ButtonStyle {
 }
 
 struct IslandView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: Recorder
     let yellow = Color(red: 1, green: 0.82, blue: 0.23)
     var body: some View {
@@ -394,26 +394,36 @@ struct IslandView: View {
                 Button(action: model.toggle) {
                     DuckMascot(recording: model.recording, level: model.level)
                         .frame(width: 84, height: model.notchHeight)
-                }.buttonStyle(DuckButtonStyle()).disabled(model.busy)
-                    .help(model.recording ? "结束会议并写入备忘录" : "打开功能菜单")
-                    .accessibilityLabel(model.recording ? "结束会议并写入备忘录" : "打开功能菜单")
+                }.buttonStyle(DuckButtonStyle())
+                    .help(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
+                    .accessibilityLabel(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
                 Color.black.frame(width: model.notchWidth + 12, height: model.notchHeight)
-                Button { withAnimation(.spring(response: 0.4)) { model.screenReader.hide(); model.showMenu = false; model.expanded.toggle() } } label: {
+                Button { withAnimation(reduceMotion ? nil : .spring(response: 0.4)) { model.screenReader.hide(); model.showMenu = false; model.expanded.toggle() } } label: {
                     HStack(spacing: 5) {
                         HStack(alignment: .center, spacing: 3) {
                             ForEach(0..<5) { index in
                                 Capsule().fill(model.recording ? yellow : Color.gray.opacity(0.65))
                                     .frame(width: 3, height: model.recording ? 4 + model.level * CGFloat([12, 20, 10, 16, 8][index]) : CGFloat([7, 13, 19, 13, 7][index]))
                             }
-                        }.frame(height: 26).animation(.easeOut(duration: 0.12), value: model.level)
+                        }.frame(height: 26).animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.level)
                         if model.count > 0 || model.recording {
                             Text("\(model.count)").font(.system(size: 16, weight: .medium, design: .rounded)).monospacedDigit()
-                                .contentTransition(.numericText()).animation(.spring(), value: model.count)
+                                .contentTransition(.numericText()).animation(reduceMotion ? nil : .spring(), value: model.count)
                             Text("句").font(.system(size: 10)).foregroundStyle(.gray)
                         }
                     }.foregroundStyle(yellow).frame(width: 84)
                 }.buttonStyle(.plain).help("展开或收起文字 · 按标点估算句数")
             }.frame(height: model.notchHeight + 2)
+            if model.recording {
+                HStack(spacing:12) {
+                    TimelineView(.periodic(from:.now,by:1)) { context in
+                        let seconds = Int(context.date.timeIntervalSince(model.recordingStartedAt ?? context.date))
+                        Text(String(format:"录制中 · %02d:%02d",max(0,seconds)/60,max(0,seconds)%60)).monospacedDigit()
+                    }
+                    Button("结束会议") { Task { await model.stopMeeting() } }
+                        .disabled(model.busy).buttonStyle(.borderedProminent).tint(.red)
+                }.font(.system(size:12)).padding(8).background(.black,in:Capsule())
+            }
             if !model.toast.isEmpty {
                 Text(model.toast).font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white).lineLimit(1).truncationMode(.middle)
@@ -425,15 +435,24 @@ struct IslandView: View {
             if model.showMenu {
                 HStack(alignment: .top, spacing: 0) {
                     Button(action: model.meeting) {
-                        HangingMascot(name: "monkey", phase: 0)
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.busy)
+                        VStack(spacing:0) {
+                            HangingMascot(name: "monkey", phase: 0)
+                            Text("会议记录").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
+                        }
+                    }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
                         .help("会议 · 录制系统声音和麦克风").accessibilityLabel("猴子 · 会议")
                     Button(action: model.readScreen) {
-                        HangingMascot(name: "koala", phase: 1.8)
+                        VStack(spacing:0) {
+                            HangingMascot(name: "koala", phase: 1.8)
+                            Text("提取文字").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
+                        }
                     }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
                         .help("读屏 · 框选识别并保存文字").accessibilityLabel("树袋熊 · 读屏")
                     Button(action: model.startReview) {
-                        HangingMascot(name: "parrot", phase: 3.6)
+                        VStack(spacing:0) {
+                            HangingMascot(name: "parrot", phase: 3.6)
+                            Text("截图批阅").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
+                        }
                     }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
                         .help("批阅 · 截图框选和语音评审").accessibilityLabel("鹦鹉 · 批阅")
                     Spacer(minLength: 0)
@@ -500,10 +519,11 @@ struct IslandView: View {
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
-        .animation(.spring(response: 0.42, dampingFraction: 0.85), value: model.expanded)
-        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.showMenu)
+        .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.85), value: model.expanded)
+        .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: model.showMenu)
         .contextMenu {
-            Button(model.recording ? "结束会议并写入备忘录" : "打开功能菜单", action: model.toggle)
+            Button(model.showMenu ? "收起功能控制面板" : "打开功能控制面板", action: model.toggle)
+            if model.recording { Button("结束会议") { Task { await model.stopMeeting() } }.disabled(model.busy) }
             Button("复制文字", action: model.copy).disabled(model.transcript.isEmpty)
             Divider()
             Button("退出小鸭") { NSApp.terminate(nil) }
@@ -602,7 +622,7 @@ final class IslandPanel: NSPanel {
         let isExpanded = expanded ?? model.expanded
         let screenReader = model.screenReader.visible && !(menu ?? model.showMenu)
         let width = screenReader ? max(420, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(460, notch + 180) : notch + 180)
-        let height = model.notchHeight + ((menu ?? model.showMenu) ? 106 : (screenReader ? 306 : (isExpanded ? 352 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44)
+        let height = model.notchHeight + ((menu ?? model.showMenu) ? 138 : (screenReader ? 306 : (isExpanded ? 352 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording ? 44 : 0)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
     }
     @objc func spaceChanged() { panel.orderFrontRegardless() }
