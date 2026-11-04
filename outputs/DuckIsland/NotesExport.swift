@@ -213,6 +213,7 @@ struct BackgroundSaveResult {
         if !warning.isEmpty { message += "；转写不完整，请查看记录中的警告" }
         if case .failed(let detail) = localBackup { message += "：" + detail }
         if let error { message += "；" + error }
+        if !analysisError.isEmpty { message += "；总结未完成：" + analysisError }
         return message
     }
     var statusMessage: String {
@@ -228,7 +229,7 @@ func meetingBody(transcript: String, analysis: String, error: String, warning: S
     #if APP_STORE
     return "会议转写原文\n系统声音与麦克风分别标注，非发言人识别。\n\n" + transcript + (warning.isEmpty ? "" : "\n\n记录状态：" + warning)
     #else
-    let summary = analysis.isEmpty ? "自动总结暂未完成：" + error : analysis
+    let summary = analysis.isEmpty ? (error.isEmpty ? "未生成 AI 总结。" : "自动总结暂未完成：" + error) : analysis
     return summary + "\n\n会议转写原文\n系统声音与麦克风分别标注，非发言人识别。\n\n" + transcript + (warning.isEmpty ? "" : "\n\n记录状态：" + warning)
     #endif
 }
@@ -244,11 +245,19 @@ func finishMeetingInBackground(title: String, transcript: String, warning: Strin
     previousAnalysis: String, previousError: String,
     analyzer: (String) throws -> String = defaultMeetingAnalyzer,
     exporter: (String, String, String?) throws -> NoteReceipt = { try insertIntoNotesInBackground(title: $0, text: $1, existingID: $2) },
-    backupWriter: (String, URL) throws -> Void = { try $0.write(to: $1, atomically: true, encoding: .utf8) }
+    backupWriter: (String, URL) throws -> Void = { try $0.write(to: $1, atomically: true, encoding: .utf8) },
+    stage: (String) -> Void = { _ in }
 ) -> BackgroundSaveResult {
+    stage("录音已停止 · 正在保存本地原文")
+    if let backupURL {
+        do { try backupWriter(title + "\n\n" + meetingBody(transcript: transcript, analysis: previousAnalysis, error: previousError, warning: warning), backupURL)
+            stage("录音已停止 · 本地原文已保存")
+        } catch { stage("本地原文保存失败：" + error.localizedDescription) }
+    }
     var analysis = previousAnalysis, analysisError = previousError
     #if !APP_STORE
     if analyze {
+        stage("录音已停止 · AI 总结处理中；本地保存结果见任务记录")
         do { analysis = try analyzer(transcript); analysisError = "" }
         catch { analysisError = error.localizedDescription }
     }
@@ -263,6 +272,7 @@ func finishMeetingInBackground(title: String, transcript: String, warning: Strin
         try backupWriter(title + "\n\n" + body, backupURL)
         localBackup = .saved
     } catch { localBackup = .failed(error.localizedDescription) }
+    stage(localBackup.succeeded ? "本地记录已保存 · 正在同步备忘录" : "本地保存失败 · 正在独立尝试备忘录同步")
     // A failed local disk must not prevent an independent Notes save.
     do {
         let receipt = try exporter(title, body, existingID)

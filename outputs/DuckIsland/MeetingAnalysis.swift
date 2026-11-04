@@ -1,3 +1,4 @@
+#if !APP_STORE
 import Foundation
 import Darwin
 
@@ -35,7 +36,7 @@ func analyzeMeeting(_ transcript: String, cancellation: SaveCancellation? = nil)
     let manager = FileManager.default
     let candidates = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", manager.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path, "/Applications/Codex.app/Contents/Resources/codex"]
     guard let binary = candidates.first(where: { manager.isExecutableFile(atPath: $0) }) else {
-        throw NotesFailure(detail: "未找到 Codex CLI，原文仍会保存。安装并登录 Codex 后可重试总结。")
+        throw NotesFailure(detail: "总结服务尚未就绪，原文仍会保存。请安装并登录 Codex 后重试。")
     }
     let root = manager.temporaryDirectory.appendingPathComponent("DuckIsland-analysis-" + UUID().uuidString, isDirectory: true)
     try manager.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -71,10 +72,12 @@ func analyzeMeeting(_ transcript: String, cancellation: SaveCancellation? = nil)
     process.standardInput = input; process.standardOutput = log; process.standardError = log
     try runBoundedProcess(process, timeout: 180, cancellation: cancellation)
     guard process.terminationStatus == 0 else {
-        throw NotesFailure(detail: "Codex CLI 未完成（退出码 \(process.terminationStatus)）。请检查网络及 codex login 登录状态，原文已保留。")
+        throw NotesFailure(detail: "总结未完成。请检查网络及 Codex 登录状态，原文已保留。")
     }
     guard let data = try? Data(contentsOf: resultURL), let result = try? JSONDecoder().decode(MeetingAnalysis.self, from: data), !result.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         throw NotesFailure(detail: "Codex 返回结果不完整，原文已保留，可重试总结。")
     }
     return result
 }
+
+#endif

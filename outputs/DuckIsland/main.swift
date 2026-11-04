@@ -30,6 +30,21 @@ func sentenceCount(_ text: String) -> Int {
     @Published var analysisError = ""
     @Published var toast = ""
     @Published var processing = false
+    @Published var automaticSummary = UserDefaults.standard.bool(forKey: "automaticMeetingSummary")
+    func setAutomaticSummary(_ enabled: Bool) {
+        #if !APP_STORE
+        if enabled {
+            let alert = NSAlert(); alert.messageText = "自动生成 AI 总结"
+            alert.informativeText = "启用后，会议转写文字会发送至 Codex 服务生成总结与待办。关闭不影响本地文字保存和备忘录同步。"
+            alert.addButton(withTitle: "启用"); alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        automaticSummary = enabled
+        UserDefaults.standard.set(enabled, forKey: "automaticMeetingSummary")
+        #endif
+    }
+    func showRecentRecords() { RecordWindows.shared.show() }
+    func showMeetingResult() { RecordWindows.shared.result(title: title, text: noteBody) }
     private var toastToken = UUID()
     private var sessionID = UUID()
     private let saveJobs = MeetingSaveJobs()
@@ -93,17 +108,15 @@ func sentenceCount(_ text: String) -> Int {
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
         if recording { Task { @MainActor in await stopMeeting() }; return }
-        #if APP_STORE
-        if !UserDefaults.standard.bool(forKey:"meetingDisclosureAccepted") {
+        if !UserDefaults.standard.bool(forKey:"meetingDisclosureAcceptedV2") {
             let alert = NSAlert()
             alert.messageText = "开始会议转写"
-            alert.informativeText = "将采集 Mac 的系统声音（包括其他应用）与麦克风，不保存会议画面或原始录音文件。语音可能由 Apple 在线识别。结束后保存本地文字，并申请写入 Apple 备忘录。请先告知参会者并取得所需同意。"
+            alert.informativeText = "将采集 Mac 的系统声音（包括其他应用）与麦克风，不保存会议画面或原始录音文件。语音由 Apple 优先本地识别，可能使用在线识别。结束后保存本地文字，并申请写入 Apple 备忘录。请先告知参会者并取得所需同意。"
             alert.addButton(withTitle:"继续")
             alert.addButton(withTitle:"取消")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
-            UserDefaults.standard.set(true,forKey:"meetingDisclosureAccepted")
+            UserDefaults.standard.set(true,forKey:"meetingDisclosureAcceptedV2")
         }
-        #endif
         showMenu = false; expanded = true; busy = true
         Task { @MainActor in
             defer { busy = false }
@@ -173,8 +186,8 @@ func sentenceCount(_ text: String) -> Int {
     }
     @MainActor func stopMeeting() async {
         guard recording, !busy else { return }
-        busy = true; showMenu = false; expanded = false
-        message = "正在结束录音并整理文字…"
+        busy = true; showMenu = false; expanded = true
+        message = "正在停止录音…"
         if let capture {
             do { try await capture.stop() }
             catch { warning = "停止音频采集时出错：\(error.localizedDescription)" }
@@ -184,7 +197,7 @@ func sentenceCount(_ text: String) -> Int {
         // Admission is bounded; framework calls may still delay deadline handling.
         // A quit timeout leaves this task running so accepted audio can drain.
         while recognition.pending {
-            message = "正在完成转写 · 剩余 \(recognition.pendingCount) 个音频片段…"
+            message = "录音已停止 · 正在完成转写 · 剩余 \(recognition.pendingCount) 个音频片段…"
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         transcript = recognition.finalText()
@@ -204,7 +217,7 @@ func sentenceCount(_ text: String) -> Int {
             #if APP_STORE
             enqueueSave(analyze: false)
             #else
-            enqueueSave(analyze: true)
+            enqueueSave(analyze: automaticSummary)
             #endif
         }
         busy = false
@@ -212,13 +225,18 @@ func sentenceCount(_ text: String) -> Int {
     @MainActor private func enqueueSave(analyze: Bool) {
         guard !processing, !transcript.isEmpty else { return }
         let jobID = sessionID
+        guard !RecordWindows.shared.running.contains(jobID) else { return }
+        RecordWindows.shared.running.insert(jobID)
         let input = transcript, jobTitle = title, url = backupURL, existingID = noteID
         let jobWarning = warning, previousAnalysis = analysisText, previousError = analysisError
         let cancellation = saveJobs.begin(jobID, text: jobTitle + "\n\n" + noteBody)
         let writer = backupWriter
         processing = true
-        expanded = false; showMenu = false
-        message = "会议正在后台整理和保存"
+        expanded = true; showMenu = false
+        message = "录音已停止 · 正在保存"
+        RecordWindows.shared.jobs[jobID] = jobTitle + "\n" + message
+        RecordWindows.shared.retries[jobID] = nil
+        RecordWindows.shared.summaryRetries[jobID] = nil
         Task { @MainActor in
             let result = await Task.detached(priority: .utility) { () -> BackgroundSaveResult in
                 finishMeetingInBackground(title: jobTitle, transcript: input, warning: jobWarning,
@@ -232,9 +250,32 @@ func sentenceCount(_ text: String) -> Int {
                         #endif
                     },
                     exporter: { try insertIntoNotesInBackground(title: $0, text: $1, existingID: $2, cancellation: cancellation) },
-                    backupWriter: { try writer.writeFinal($0, to: $1) })
+                    backupWriter: { try writer.writeFinal($0, to: $1) },
+                    stage: { status in
+                        Task { @MainActor in
+                            guard RecordWindows.shared.running.contains(jobID) else { return }
+                            RecordWindows.shared.jobs[jobID] = (RecordWindows.shared.jobs[jobID] ?? jobTitle) + "\n" + status
+                            if self.sessionID == jobID { self.message = status }
+                        }
+                    })
             }.value
+            RecordWindows.shared.running.remove(jobID)
             saveJobs.complete(jobID, result: result)
+            RecordWindows.shared.jobs[jobID] = jobTitle + "\n" + result.presentationMessage(warning: jobWarning)
+            if !result.localBackup.succeeded || result.receipt == nil {
+                RecordWindows.shared.retries[jobID] = { [weak self] in
+                    self?.retrySavedSnapshot(id: jobID, title: jobTitle, transcript: input, warning: jobWarning, url: url, result: result)
+                }
+            }
+            RecordWindows.shared.jobResults[jobID] = { RecordWindows.shared.result(title: jobTitle, text: meetingBody(transcript: input, analysis: result.analysis, error: result.analysisError, warning: jobWarning)) }
+            #if !APP_STORE
+            if !result.analysisError.isEmpty {
+                RecordWindows.shared.summaryRetries[jobID] = { [weak self] in
+                    self?.retrySavedSnapshot(id: jobID, title: jobTitle, transcript: input, warning: jobWarning, url: url, result: result, analyze: true)
+                }
+            }
+            #endif
+            RecordWindows.shared.refresh()
             if sessionID == jobID {
                 processing = false
                 analysisText = result.analysis
@@ -249,6 +290,51 @@ func sentenceCount(_ text: String) -> Int {
             if sessionID == jobID { notify(message) }
         }
     }
+    private func retrySavedSnapshot(id: UUID, title: String, transcript: String, warning: String, url: URL?, result: BackgroundSaveResult, analyze: Bool = false) {
+        #if !APP_STORE
+        if analyze && !automaticSummary { setAutomaticSummary(true) }
+        if analyze && !automaticSummary { return }
+        #endif
+        guard !RecordWindows.shared.running.contains(id) else { return }
+        RecordWindows.shared.running.insert(id)
+        RecordWindows.shared.summaryRetries[id] = nil
+        RecordWindows.shared.retries[id] = nil
+        RecordWindows.shared.jobs[id] = title + "\n正在重试本地保存与备忘录同步"
+        let token = saveJobs.begin(id, text: result.recoveryText)
+        let writer = backupWriter
+        Task {
+            let next = await Task.detached {
+                finishMeetingInBackground(title: title, transcript: transcript, warning: warning, backupURL: url, existingID: result.receipt?.id, analyze: analyze, previousAnalysis: result.analysis, previousError: result.analysisError,
+                    analyzer: { text in
+                        #if APP_STORE
+                        return ""
+                        #else
+                        return try analyzeMeeting(text, cancellation: token).rendered
+                        #endif
+                    },
+                    exporter: { try insertIntoNotesInBackground(title: $0, text: $1, existingID: $2, cancellation: token) }, backupWriter: { try writer.writeFinal($0, to: $1) })
+            }.value
+            RecordWindows.shared.running.remove(id)
+            saveJobs.complete(id, result: next)
+            RecordWindows.shared.jobs[id] = title + "\n" + next.presentationMessage(warning: warning)
+            if !next.localBackup.succeeded || next.receipt == nil {
+                RecordWindows.shared.retries[id] = { [weak self] in self?.retrySavedSnapshot(id: id, title: title, transcript: transcript, warning: warning, url: url, result: next) }
+            }
+            RecordWindows.shared.jobResults[id] = { RecordWindows.shared.result(title: title, text: meetingBody(transcript: transcript, analysis: next.analysis, error: next.analysisError, warning: warning)) }
+            #if !APP_STORE
+            if !next.analysisError.isEmpty {
+                RecordWindows.shared.summaryRetries[id] = { [weak self] in self?.retrySavedSnapshot(id: id, title: title, transcript: transcript, warning: warning, url: url, result: next, analyze: true) }
+            }
+            #endif
+            if self.sessionID == id {
+                self.analysisText = next.analysis; self.analysisError = next.analysisError
+                self.localBackupSaved = next.localBackup.succeeded
+                self.noteSaved = next.receipt != nil; self.noteID = next.receipt?.id
+                self.message = next.presentationMessage(warning: warning)
+            }
+            RecordWindows.shared.refresh()
+        }
+    }
     @MainActor func notify(_ text: String) {
         let token = UUID(); toastToken = token; toast = text
         Task { @MainActor in
@@ -259,6 +345,8 @@ func sentenceCount(_ text: String) -> Int {
     #if !APP_STORE
     func retryAnalysis() {
         guard !busy, !recording else { return }
+        if !automaticSummary { setAutomaticSummary(true) }
+        guard automaticSummary else { return }
         Task { @MainActor in enqueueSave(analyze: true) }
     }
     #endif
@@ -345,7 +433,7 @@ func sentenceCount(_ text: String) -> Int {
     func copy() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(transcript, forType: .string)
-        copied = true
+        copied = !transcript.isEmpty && NSPasteboard.general.string(forType: .string) == transcript
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.copied = false }
     }
 }
@@ -443,6 +531,14 @@ struct IslandView: View {
                 ScreenReaderView(reader: model.screenReader)
             } else if model.expanded {
                 Rectangle().fill(.white.opacity(0.09)).frame(height: 1).padding(.horizontal, 22)
+                HStack {
+                    Button("最近记录与任务") { model.showRecentRecords() }
+                    Button("查看会议结果") { model.showMeetingResult() }.disabled(model.transcript.isEmpty)
+                }.font(.system(size: 11)).foregroundStyle(yellow).padding(.top, 8)
+                #if !APP_STORE
+                Toggle("自动生成 AI 总结", isOn: Binding(get: { model.automaticSummary }, set: { model.setAutomaticSummary($0) }))
+                    .font(.system(size: 11)).padding(.horizontal, 22)
+                #endif
                 Text(model.audioStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(model.recording ? yellow : .gray)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.top, 12)
                 ScrollViewReader { proxy in
@@ -484,7 +580,7 @@ struct IslandView: View {
                     Circle().fill(model.recording ? yellow : .gray).frame(width: 5, height: 5)
                     Text(model.message).font(.system(size: 10)).foregroundStyle(.gray).lineLimit(3)
                     Spacer()
-                    Button(model.copied ? "已复制" : "复制") { model.copy() }.disabled(model.transcript.isEmpty)
+                    Button(model.copied ? "已复制原文" : "复制原文") { model.copy() }.disabled(model.transcript.isEmpty)
                     Button { withAnimation { model.expanded = false; model.showMenu = false } } label: { Image(systemName: "chevron.up") }
                 }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 18)
             }
@@ -581,8 +677,8 @@ final class IslandPanel: NSPanel {
         menu.addItem(withTitle: "回到屏幕顶部", action: #selector(reset), keyEquivalent: "")
         #if APP_STORE
         menu.addItem(withTitle:"隐私与使用说明",action:#selector(showPrivacy),keyEquivalent:"")
-        menu.addItem(withTitle:"查看本地记录",action:#selector(showRecords),keyEquivalent:"")
         #endif
+        menu.addItem(withTitle: "最近记录与任务", action: #selector(recentRecords), keyEquivalent: "")
         menu.addItem(withTitle: "恢复未保存会议", action: #selector(recoverMeetings), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "退出", action: #selector(quit), keyEquivalent: "q")
@@ -602,7 +698,7 @@ final class IslandPanel: NSPanel {
         let isExpanded = expanded ?? model.expanded
         let screenReader = model.screenReader.visible && !(menu ?? model.showMenu)
         let width = screenReader ? max(420, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(460, notch + 180) : notch + 180)
-        let height = model.notchHeight + ((menu ?? model.showMenu) ? 106 : (screenReader ? 306 : (isExpanded ? 352 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44)
+        let height = model.notchHeight + ((menu ?? model.showMenu) ? 106 : (screenReader ? 306 : (isExpanded ? 408 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
     }
     @objc func spaceChanged() { panel.orderFrontRegardless() }
@@ -621,6 +717,7 @@ final class IslandPanel: NSPanel {
         } catch { model.notify("无法打开记录目录：" + error.localizedDescription) }
     }
     #endif
+    @objc func recentRecords() { model.showRecentRecords() }
     @objc func recoverMeetings() { model.recoverUnsavedMeetings() }
     @objc func quit() { NSApp.terminate(nil) }
     private var terminating = false
