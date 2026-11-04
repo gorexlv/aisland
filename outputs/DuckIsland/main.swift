@@ -10,13 +10,14 @@ func sentenceCount(_ text: String) -> Int {
 }
 
 @MainActor final class Recorder: ObservableObject {
-    let screenReader = ScreenReader()
+    let screenReader: ScreenReader
     let review: ReviewModel
     private var screenChanges: AnyCancellable?
     var terminationRequested = false
     @Published var recording = false
     @Published var audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
     @Published var busy = false
+    @Published var microphoneReserved = false { didSet { updateVoiceAvailability() } }
     @Published var transcript = ""
     @Published var message = "选择会议，记录系统声音和麦克风"
     @Published var level: CGFloat = 0
@@ -47,12 +48,13 @@ func sentenceCount(_ text: String) -> Int {
     private var warning = ""
     var count: Int { sentenceCount(transcript) }
 
-    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil) {
+    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil) {
+        self.screenReader = screenReader ?? ScreenReader()
         self.recognition = recognition
         self.review = review ?? ReviewModel()
-        screenReader.onNotice = { [weak self] text in self?.notify(text) }
+        self.screenReader.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onNotice = { [weak self] text in self?.notify(text) }
-        screenChanges = screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        screenChanges = self.screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         recognition.onAudioStatus = { [weak self] status in self?.audioStatus = status }
         recognition.onText = { [weak self] text in
             guard let self else { return }
@@ -69,6 +71,13 @@ func sentenceCount(_ text: String) -> Int {
             Task { @MainActor in await self.stopMeeting() }
         }
     }
+    private func updateVoiceAvailability() {
+        review.voice.unavailableReason = microphoneReserved ? "会议录音中，可输入文字" : nil
+    }
+    func quickReadScreen() {
+        guard !terminationRequested else { return }
+        showMenu = false; expanded = false; screenReader.visible = true; screenReader.captureRegion()
+    }
     func toggle() {
         guard !busy else { return }
         screenReader.hide()
@@ -78,18 +87,16 @@ func sentenceCount(_ text: String) -> Int {
     }
     func startReview() {
         guard !terminationRequested else { return }
-        guard !recording, !busy else { notify("请先结束会议，再开启批阅"); return }
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
         review.start()
     }
     func readScreen() {
-        guard !review.active else { notify("请先关闭批阅"); return }
-        guard !recording, !busy else { notify("请先结束会议，再开启读屏"); return }
+        guard !terminationRequested else { return }
         showMenu = false; expanded = false; screenReader.open()
     }
     func meeting() {
         guard !terminationRequested else { return }
-        guard !review.active else { notify("请先关闭批阅"); return }
+        guard !review.voice.voiceActive else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
         if recording { Task { @MainActor in await stopMeeting() }; return }
@@ -104,9 +111,9 @@ func sentenceCount(_ text: String) -> Int {
             UserDefaults.standard.set(true,forKey:"meetingDisclosureAccepted")
         }
         #endif
-        showMenu = false; expanded = true; busy = true
+        showMenu = false; expanded = true; busy = true; microphoneReserved = true
         Task { @MainActor in
-            defer { busy = false }
+            defer { busy = false; if !recording { microphoneReserved = false } }
             do {
                 message = "正在检查麦克风权限…"
                 let microphone = await AVCaptureDevice.requestAccess(for: .audio)
@@ -179,7 +186,7 @@ func sentenceCount(_ text: String) -> Int {
             do { try await capture.stop() }
             catch { warning = "停止音频采集时出错：\(error.localizedDescription)" }
         }
-        capture = nil; recording = false; level = 0
+        capture = nil; recording = false; microphoneReserved = false; level = 0
         recognition.finish()
         // Admission is bounded; framework calls may still delay deadline handling.
         // A quit timeout leaves this task running so accepted audio can drain.
@@ -430,11 +437,11 @@ struct IslandView: View {
                         .help("会议 · 录制系统声音和麦克风").accessibilityLabel("猴子 · 会议")
                     Button(action: model.readScreen) {
                         HangingMascot(name: "koala", phase: 1.8)
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
+                    }.buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
                         .help("读屏 · 框选识别并保存文字").accessibilityLabel("树袋熊 · 读屏")
                     Button(action: model.startReview) {
                         HangingMascot(name: "parrot", phase: 3.6)
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
+                    }.buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
                         .help("批阅 · 截图框选和语音评审").accessibilityLabel("鹦鹉 · 批阅")
                     Spacer(minLength: 0)
                 }.padding(.leading, 6).padding(.top, -4).padding(.bottom, 12)
@@ -445,16 +452,8 @@ struct IslandView: View {
                 Rectangle().fill(.white.opacity(0.09)).frame(height: 1).padding(.horizontal, 22)
                 Text(model.audioStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(model.recording ? yellow : .gray)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.top, 12)
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(model.transcript.isEmpty ? (model.recording ? "正在听…" : "点击小鸭，选择「会议」。\n结束后自动写入 Apple 备忘录。") : model.transcript)
-                            .font(.system(size: 16)).lineSpacing(7)
-                            .foregroundStyle(model.transcript.isEmpty ? Color.gray : Color.white.opacity(0.92))
-                            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        Color.clear.frame(height: 1).id("bottom")
-                    }.frame(height: 138).padding(22)
-                        .onChange(of: model.transcript) { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
+                TranscriptReader(text:model.transcript.isEmpty ? "正在等待会议文字…" : model.transcript)
+                    .frame(height:138).padding(22)
                 if !model.recording && !model.busy && !model.processing && !model.transcript.isEmpty {
                     if !model.savedNoteName.isEmpty {
                         Button(action: model.openSavedNote) {
@@ -577,6 +576,7 @@ final class IslandPanel: NSPanel {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🐤"
         let menu = NSMenu()
+        menu.addItem(withTitle: "快捷框选取字", action: #selector(quickReadScreen), keyEquivalent: "")
         menu.addItem(withTitle: "显示小鸭", action: #selector(show), keyEquivalent: "")
         menu.addItem(withTitle: "回到屏幕顶部", action: #selector(reset), keyEquivalent: "")
         #if APP_STORE
@@ -605,6 +605,7 @@ final class IslandPanel: NSPanel {
         let height = model.notchHeight + ((menu ?? model.showMenu) ? 106 : (screenReader ? 306 : (isExpanded ? 352 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
     }
+    @objc private func quickReadScreen() { model.quickReadScreen() }
     @objc func spaceChanged() { panel.orderFrontRegardless() }
     @objc func screenChanged() { position() }
     @objc func show() { panel.orderFrontRegardless() }
@@ -635,6 +636,10 @@ final class IslandPanel: NSPanel {
         model.terminationRequested = true
         Task { @MainActor in
             defer { model.terminationRequested = false }
+            guard model.screenReader.preserveForTermination() else {
+                model.notify("读屏修改尚未保存，已取消退出；请重试保存")
+                terminating = false; reply(false); return
+            }
             guard await model.review.closeForTermination() else {
                 terminating = false; reply(false); return
             }

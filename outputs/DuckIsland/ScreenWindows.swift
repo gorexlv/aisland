@@ -51,3 +51,26 @@ func captureScreenWindow(_ target: ScreenTarget, purpose: ScreenCapturePurpose =
     guard let data = rep.representation(using: .png, properties: [:]) else { throw NotesFailure(detail: "无法读取窗口画面") }
     return (data, CGSize(width: image.width, height: image.height))
 }
+
+// Region coordinates are normalized within one display, with top-left origin.
+// ScreenCaptureKit resolves the display itself, avoiding global AppKit Y offsets.
+func displayRegionRect(_ region: CGRect, size: CGSize) -> CGRect {
+    CGRect(x:region.minX * size.width,y:region.minY * size.height,width:region.width * size.width,height:region.height * size.height)
+}
+func captureDisplayRegion(displayID: UInt32, region: CGRect) async throws -> Data {
+    let content = try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
+    guard let display = content.displays.first(where:{$0.displayID == displayID}),
+          region.width > 0, region.height > 0, region.minX >= 0, region.minY >= 0, region.maxX <= 1, region.maxY <= 1 else {
+        throw NotesFailure(detail:"屏幕或框选区域已失效")
+    }
+    let own = content.applications.filter { $0.processID == getpid() }
+    let filter = SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
+    let config = SCStreamConfiguration()
+    let rect = displayRegionRect(region,size:filter.contentRect.size)
+    config.sourceRect = rect
+    let size = screenCaptureSize(rect.size,scale:CGFloat(filter.pointPixelScale),purpose:.ocr)
+    config.width = Int(size.width); config.height = Int(size.height); config.showsCursor = false
+    let image = try await SCScreenshotManager.captureImage(contentFilter:filter,configuration:config)
+    guard let data = NSBitmapImageRep(cgImage:image).representation(using:.png,properties:[:]) else { throw NotesFailure(detail:"无法读取屏幕区域") }
+    return data
+}
