@@ -51,6 +51,31 @@ Task { @MainActor in
     precondition(contexts.last == "OCR 识别文字（Fixture · Doc）：\n乙" && contexts.count == 2, "\(contexts)")
     other.setSpeakingEnabled(false)
     precondition(!other.speakingEnabled)
+    // serialized live control: rapid toggles end stopped, never double-start
+    var running = 0, maxRunning = 0
+    other.startLive = { _ in running += 1; maxRunning = max(maxRunning,running); try? await Task.sleep(nanoseconds:20_000_000) }
+    other.stopLive = { running = 0 }
+    other.setSpeakingEnabled(true); other.setSpeakingEnabled(false); other.setSpeakingEnabled(true); other.setSpeakingEnabled(false)
+    try await Task.sleep(nanoseconds:400_000_000)
+    precondition(!other.speakingEnabled && running == 0 && maxRunning <= 1, "running=\(running) max=\(maxRunning)")
+    // re-save of the same selection replaces the record
+    let rs = WindowOCRSession(voice:VoiceInput(),storageRoot:base.appendingPathComponent("s4"))
+    rs.active = true
+    rs.reader.accept(ScreenReadResult(text:"原文",image:png),target:fixture,region:region)
+    let firstFile = rs.records[0].file
+    rs.reader.text = "改后"; rs.reader.save()
+    precondition(rs.records.count == 1 && rs.records[0].text == "改后" && rs.records[0].file == rs.reader.savedFile && rs.records[0].file != firstFile)
+    precondition(fm.fileExists(atPath:firstFile.path), "old folder kept")
+    rs.reader.accept(ScreenReadResult(text:"新选区",image:png),target:fixture,region:region,choice:.discard)
+    precondition(rs.records.count == 2)
+    // note is one source of truth
+    rs.note = "新意图"
+    rs.reader.accept(ScreenReadResult(text:"带意图",image:png),target:fixture,region:region)
+    let m3 = try JSONDecoder().decode([String:String].self,from:Data(contentsOf:rs.records.last!.file.deletingLastPathComponent().appendingPathComponent("source.json")))
+    precondition(m3["意图"] == "新意图")
+    // attach while active is refused
+    let again = await rs.attach(fixture,note:"x")
+    precondition(!again && rs.status == "请先结束当前读屏" && rs.records.count == 3)
     // end() read-only vs writable
     let ro = base.appendingPathComponent("ro")
     try fm.createDirectory(at:ro,withIntermediateDirectories:true)

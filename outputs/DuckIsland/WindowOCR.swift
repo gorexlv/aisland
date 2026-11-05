@@ -17,11 +17,13 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
     var panels = WindowOCRPanels()
     @Published var active = false
     @Published var target: ScreenTarget?
-    @Published var note = ""
+    @Published var note = "" { didSet { reader.note = note } }
     @Published var records: [WindowOCRRecord] = []
     @Published var speakingEnabled = false
     @Published var status = ""
     var startLive: ((String) async -> Void)?
+    var stopLive: (() async -> Void)?
+    private var liveChain: Task<Void,Never>?
     private var tracking: Timer?
     private var trackingBusy = false
     private var token = UUID()
@@ -34,9 +36,10 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
     }
     var latestText: String { reader.text }
     func attach(_ item: ScreenTarget, note: String) async -> Bool {
+        guard !active else { status = "请先结束当前读屏"; return false }
         do { _ = try await resolveScreenWindow(item) } catch { status = error.localizedDescription; return false }
         token = UUID()
-        target = item; self.note = note; reader.note = note; active = true
+        target = item; self.note = note; active = true
         records = []; speakingEnabled = false
         tracking?.invalidate()
         tracking = Timer.scheduledTimer(withTimeInterval:0.8,repeats:true) { [weak self] _ in
@@ -47,22 +50,35 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
     }
     func reframe() { if let target { reader.select(target) } }
     private func saved(_ file: URL, _ text: String) {
-        records.append(WindowOCRRecord(id:UUID(),file:file,text:text,date:Date()))
-        guard speakingEnabled, let target else { return }
-        let session = token
-        Task { await live.stop(); guard session == token, speakingEnabled else { return }; await begin(target,text) }
+        if reader.lastSaveWasResave, !records.isEmpty { records[records.count-1] = WindowOCRRecord(id:records[records.count-1].id,file:file,text:text,date:records[records.count-1].date) }
+        else { records.append(WindowOCRRecord(id:UUID(),file:file,text:text,date:Date())) }
+        if speakingEnabled { enqueueLive(restart:true) }
     }
-    private func begin(_ target: ScreenTarget, _ text: String) async {
-        let context = "OCR 识别文字（\(target.label)）：\n" + text
-        if let startLive { await startLive(context) } else { await live.start(context:context,deviceID:voice.selectedInputID) }
+    private func enqueue(_ op: @escaping @MainActor () async -> Void) {
+        let previous = liveChain
+        liveChain = Task { await previous?.value; await op() }
+    }
+    private func enqueueLive(restart: Bool) {
+        enqueue { [weak self] in
+            guard let self, self.speakingEnabled, let target = self.target else { return }
+            let text = self.latestText
+            guard !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+            await self.stopNow()
+            guard self.speakingEnabled else { return }
+            let context = "OCR 识别文字（\(target.label)）：\n" + text
+            if let startLive = self.startLive { await startLive(context) } else { await self.live.start(context:context,deviceID:self.voice.selectedInputID) }
+        }
+    }
+    private func stopNow() async { if let stopLive { await stopLive() } else { await live.stop() } }
+    private func stopLiveSerialized() async {
+        enqueue { [weak self] in await self?.stopNow() }
+        await liveChain?.value
     }
     func setSpeakingEnabled(_ on: Bool) {
         if on {
-            guard let target, !latestText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { status = "请先框选识别文字"; return }
-            speakingEnabled = true
-            let text = latestText
-            Task { await begin(target,text) }
-        } else { speakingEnabled = false; Task { await live.stop() } }
+            guard target != nil, !latestText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { status = "请先框选识别文字"; return }
+            speakingEnabled = true; enqueueLive(restart:false)
+        } else { speakingEnabled = false; enqueue { [weak self] in await self?.stopNow() } }
     }
     private func track() async {
         guard active, !trackingBusy, let target else { return }
@@ -76,7 +92,7 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
         } catch {
             guard session == token, self.target == target else { return }
             speakingEnabled = false
-            await live.stop()
+            await stopLiveSerialized()
             guard session == token else { return }
             reader.cancel(); tracking?.invalidate(); tracking = nil
             status = "目标窗口已关闭，已有读屏记录仍可查看"
@@ -87,7 +103,7 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
         if reader.dirty { return false }
         token = UUID(); tracking?.invalidate(); tracking = nil
         speakingEnabled = false
-        await live.stop()
+        await stopLiveSerialized()
         reader.reset(); panels.close()
         active = false; target = nil; note = ""; records = []; status = ""
         return true

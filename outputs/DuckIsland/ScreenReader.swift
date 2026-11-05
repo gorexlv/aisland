@@ -63,10 +63,12 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     var onNotice:((String)->Void)?
     var note = ""
     var onSaved:((URL,String)->Void)?
+    private(set) var lastSaveWasResave = false
+    private var savedOnce = false
     func open() { visible = true; refresh() }
     func cancel() { token = UUID(); busy = false; selecting = false; overlay?.close(); overlay = nil; regionPanels.forEach { $0.close() }; regionPanels = [] }
     func hide() { cancel(); visible = false }
-    func reset() { cancel(); pending = nil; savedText = nil; savedFile = nil; text = ""; preview = nil; selected = nil; note = "" }
+    func reset() { cancel(); pending = nil; savedText = nil; savedOnce = false; savedFile = nil; text = ""; preview = nil; selected = nil; note = "" }
     func refresh() {
         cancel(); selected = nil; targets = []; busy = true; permissionError = false
         let session = token
@@ -125,7 +127,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     func accept(_ result: ScreenReadResult, target: ScreenTarget, region: CGRect, choice: ReplacementChoice? = nil) {
         guard !result.text.isEmpty else { status = "没有识别到文字，原文字保留"; return }
         guard allowReplacement(choice) else { status = "已保留上次文字"; return }
-        savedFile = nil; savedText = nil
+        savedFile = nil; savedText = nil; savedOnce = false
         text = result.text; preview = NSImage(data:result.image); pending = (result,target,region)
         save()
     }
@@ -136,6 +138,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
             savedText = text
             status = "已保存：" + (savedFile?.deletingLastPathComponent().lastPathComponent ?? "")
             onNotice?("读屏文字已保存")
+            lastSaveWasResave = savedOnce; savedOnce = true
             if let savedFile { onSaved?(savedFile,text) }
         } catch { status = "保存失败：\(error.localizedDescription)，文字仍保留，可重试保存" }
     }
