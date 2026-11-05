@@ -97,6 +97,42 @@ Task { @MainActor in
     // attach to a missing window
     let attached = await good.attach(fixture,note:"n")
     precondition(!attached && good.status == "选中的窗口已关闭，请重新选择窗口" && !good.active)
+    // I-1: mic reserved -> speaking refused with the reason
+    let mic = VoiceInput(); mic.unavailableReason = "会议录音中，可输入文字"
+    let ms = WindowOCRSession(voice:mic,storageRoot:base.appendingPathComponent("s5"))
+    ms.active = true; ms.target = fixture
+    ms.reader.accept(ScreenReadResult(text:"字",image:png),target:fixture,region:region)
+    ms.setSpeakingEnabled(true)
+    precondition(!ms.speakingEnabled && ms.status == "会议录音中，可输入文字", ms.status)
+    // M-1: live connection ended while speaking -> reset + surface status
+    ms.speakingEnabled = true; ms.status = "旧"; ms.live.onEnded?()
+    precondition(!ms.speakingEnabled && ms.status == ms.live.status, ms.status)
+    // I-2: window-closed detection needs two consecutive failures, then ends
+    struct Gone: Error {}
+    let ts = WindowOCRSession(voice:VoiceInput(),storageRoot:base.appendingPathComponent("s6"))
+    ts.active = true; ts.target = fixture
+    var resolveFail = true
+    ts.resolveFrame = { _ in if resolveFail { throw Gone() }; return CGRect(x:0,y:0,width:100,height:100) }
+    await ts.track()
+    precondition(ts.active, "single failure must not end")
+    resolveFail = false; await ts.track(); resolveFail = true
+    await ts.track()
+    precondition(ts.active, "success resets the failure count")
+    await ts.track()
+    precondition(!ts.active && ts.target == nil, "second consecutive failure ends clean work")
+    // closed window with unsaved text: stays active, panels hidden, hint status
+    let ro2 = base.appendingPathComponent("ro2")
+    try fm.createDirectory(at:ro2,withIntermediateDirectories:true)
+    let us = WindowOCRSession(voice:VoiceInput(),storageRoot:ro2)
+    us.active = true; us.target = fixture
+    try fm.setAttributes([.posixPermissions:0o500],ofItemAtPath:ro2.path)
+    us.reader.accept(ScreenReadResult(text:"未存",image:png),target:fixture,region:region)
+    us.resolveFrame = { _ in throw Gone() }
+    await us.track(); await us.track()
+    precondition(us.active && us.reader.dirty && us.status == "目标窗口已关闭，未保存文字请按 ⌥E 结束后重试", us.status)
+    precondition(us.panels.toolbar?.isVisible != true && us.panels.record?.isVisible != true)
+    try fm.setAttributes([.posixPermissions:0o700],ofItemAtPath:ro2.path)
+    let endedLater = await us.end(); precondition(endedLater && !us.active)
     print("PASS: window ocr")
     exit(0)
 }

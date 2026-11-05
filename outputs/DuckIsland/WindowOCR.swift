@@ -158,11 +158,14 @@ struct WindowOCRRecordView: View {
             if !session.note.isEmpty { Text("意图：" + session.note).font(.system(size:11,weight:.medium)).foregroundStyle(IslandStyle.secondary).lineLimit(2) }
             TextEditor(text:$reader.text).font(.system(size:12)).scrollContentBackground(.hidden)
                 .padding(4).background(Color.white.opacity(0.05),in:RoundedRectangle(cornerRadius:7)).frame(minHeight:40)
+                .overlay(alignment:.topLeading) {
+                    if reader.text.isEmpty { Text("点击 Mo 或按 ⌥Enter 框选").font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(.horizontal,9).padding(.vertical,6).allowsHitTesting(false) }
+                }
             HStack(spacing:6) {
                 if reader.busy { ProgressView().controlSize(.mini) }
                 Text(session.status.isEmpty ? reader.status : session.status).font(.system(size:10)).foregroundStyle(IslandStyle.secondary).lineLimit(2)
                 Spacer(minLength:2)
-                if reader.canRetrySave { Button("重试保存") { reader.save() }.buttonStyle(.plain).font(.system(size:11,weight:.medium)).foregroundStyle(Color.blue) }
+                if reader.canRetrySave { Button(reader.status.hasPrefix("保存失败") ? "重试保存" : "保存") { reader.save() }.buttonStyle(.plain).font(.system(size:11,weight:.medium)).foregroundStyle(Color.blue) }
                 ToolButton(title:"复制",symbol:"doc.on.doc") { reader.copy() }.disabled(reader.text.isEmpty)
                 ToolButton(title:"定位文件",symbol:"folder") { reader.reveal() }.disabled(reader.savedFile == nil)
             }
@@ -191,6 +194,8 @@ struct WindowOCRRecordView: View {
     @Published var records: [WindowOCRRecord] = []
     @Published var speakingEnabled = false
     @Published var status = ""
+    var resolveFrame: (ScreenTarget) async throws -> CGRect = { try await resolveScreenWindow($0).frame }
+    private var trackFailures = 0
     var startLive: ((String) async -> Void)?
     var stopLive: (() async -> Void)?
     private var liveChain: Task<Void,Never>?
@@ -203,20 +208,24 @@ struct WindowOCRRecordView: View {
         panels.session = self
         reader.onSaved = { [weak self] file, text in self?.saved(file,text) }
         statusLink = reader.$status.dropFirst().sink { [weak self] in self?.status = $0 }
+        live.onEnded = { [weak self] in
+            guard let self, self.speakingEnabled else { return }
+            self.speakingEnabled = false; self.status = self.live.status
+        }
     }
     var latestText: String { reader.text }
     func attach(_ item: ScreenTarget, note: String) async -> Bool {
         guard !active else { status = "请先结束当前读屏"; return false }
-        let window: SCWindow
-        do { window = try await resolveScreenWindow(item) } catch { status = error.localizedDescription; return false }
+        let frame: CGRect
+        do { frame = try await resolveFrame(item) } catch { status = error.localizedDescription; return false }
         token = UUID()
-        target = item; self.note = note; active = true
+        target = item; self.note = note; active = true; trackFailures = 0
         records = []; speakingEnabled = false
         tracking?.invalidate()
         tracking = Timer.scheduledTimer(withTimeInterval:0.8,repeats:true) { [weak self] _ in
             Task { @MainActor in await self?.track() }
         }
-        panels.position(window.frame)
+        panels.position(frame)
         reframe()
         return true
     }
@@ -248,26 +257,34 @@ struct WindowOCRRecordView: View {
     }
     func setSpeakingEnabled(_ on: Bool) {
         if on {
+            if let reason = voice.unavailableReason { status = reason; return }
             guard target != nil, !latestText.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { status = "请先框选识别文字"; return }
             speakingEnabled = true; enqueueLive(restart:false)
         } else { speakingEnabled = false; enqueue { [weak self] in await self?.stopNow() } }
     }
-    private func track() async {
+    func track() async {
         guard active, !trackingBusy, let target else { return }
         trackingBusy = true; defer { trackingBusy = false }
         let session = token
         do {
-            let window = try await resolveScreenWindow(target)
+            let frame = try await resolveFrame(target)
             guard session == token, self.target == target else { return }
+            trackFailures = 0
             let visible = (CGWindowListCopyWindowInfo(.optionOnScreenOnly,kCGNullWindowID) as? [[String:Any]] ?? []).contains { ($0[kCGWindowNumber as String] as? UInt32) == target.id }
-            if visible { panels.position(window.frame) } else { panels.hideForWorkspace() }
+            if visible { panels.position(frame) } else { panels.hideForWorkspace() }
         } catch {
             guard session == token, self.target == target else { return }
+            trackFailures += 1
+            guard trackFailures >= 2 else { return }
             speakingEnabled = false
             await stopLiveSerialized()
             guard session == token else { return }
-            reader.cancel(); tracking?.invalidate(); tracking = nil
-            status = "目标窗口已关闭，已有读屏记录仍可查看"
+            reader.cancel()
+            if await end() { return }
+            guard session == token else { return }
+            tracking?.invalidate(); tracking = nil
+            panels.hideForWorkspace()
+            status = "目标窗口已关闭，未保存文字请按 ⌥E 结束后重试"
         }
     }
     func end() async -> Bool {

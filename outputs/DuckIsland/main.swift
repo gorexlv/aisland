@@ -155,6 +155,7 @@ func sentenceCount(_ text: String) -> Int {
     }
     func launch(_ target: ScreenTarget, _ capability: DuckCapability, note: String) async {
         guard !terminationRequested, !launching else { return }
+        if (review.active && review.busy) || (windowOCR.active && windowOCR.reader.busy) { notify("正在处理，请稍后再试"); return }
         launching = true; defer { launching = false }
         guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
         guard !terminationRequested else { return }
@@ -164,7 +165,9 @@ func sentenceCount(_ text: String) -> Int {
     }
     func primaryAction() {
         guard !terminationRequested else { return }
-        if windowOCR.active { reframeOCR() } else { toggleReviewShortcut() }
+        if windowOCR.active { if !windowOCR.reader.busy { reframeOCR() } }
+        else if review.active { toggleReviewShortcut() }
+        else { openLauncher() }
     }
     func restoreLatestReview() async {
         guard !terminationRequested else { return }
@@ -180,6 +183,7 @@ func sentenceCount(_ text: String) -> Int {
     func meeting() {
         guard !terminationRequested else { return }
         guard !review.voice.voiceActive, !review.live.active else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
+        guard !windowOCR.live.active else { notify("请先关闭读屏发言，等待对话结束后开始会议"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
         guard !recording else { showMenu = true; return }

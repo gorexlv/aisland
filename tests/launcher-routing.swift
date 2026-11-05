@@ -46,7 +46,7 @@ Task { @MainActor in
     review.active = true; review.busy = true
     await recorder.launch(t,.ocr,note:"n")
     precondition(review.active && review.busy && ocrCalls.isEmpty && reviewCalls.isEmpty && !ocr.active)
-    precondition(recorder.toast == "当前工作保存失败，未切换", recorder.toast)
+    precondition(recorder.toast == "正在处理，请稍后再试", recorder.toast)
 
     // 2. OCR active + clean reader -> review attach, OCR ended
     (recorder, review, ocr) = makeRecorder("b"); wire()
@@ -90,6 +90,25 @@ Task { @MainActor in
     ocr.active = false; review.active = true; review.busy = true
     recorder.primaryAction(); precondition(reframes == 1 && review.active, "inactive OCR must route to review toggle, not reframe")
     review.active = false; review.busy = false
+    // M-2: OCR reader busy -> primary action does not reframe
+    ocr.active = true; ocr.target = fixture; ocr.reader.busy = true
+    recorder.primaryAction(); precondition(reframes == 1, "busy OCR must not reframe")
+    ocr.reader.busy = false; ocr.active = false; ocr.target = nil
+    // M-4: nothing attached -> launcher opens (not the review picker)
+    recorder.launcher.loadTargets = { [] }
+    precondition(!recorder.launcher.visible)
+    recorder.primaryAction()
+    precondition(recorder.launcher.visible && !review.active && !review.picking, "primary action with no work opens launcher")
+    recorder.launcher.close(); settle()
+    // M-3: launch while current work busy -> toast, no teardown
+    review.active = true; review.busy = true; reviewCalls = []; ocrCalls = []
+    await recorder.launch(t,.ocr,note:"")
+    precondition(recorder.toast == "正在处理，请稍后再试" && review.active && ocrCalls.isEmpty, recorder.toast)
+    review.active = false; review.busy = false
+    ocr.active = true; ocr.target = fixture; ocr.reader.busy = true
+    await recorder.launch(t,.review,note:"")
+    precondition(recorder.toast == "正在处理，请稍后再试" && ocr.active && reviewCalls.isEmpty)
+    ocr.reader.busy = false; ocr.active = false; ocr.target = nil
 
     // 5. attach failure surfaces status as toast
     recorder.attachReview = { _,_ in review.status = "窗口已关闭"; return false }
@@ -151,6 +170,22 @@ Task { @MainActor in
     let denied = LauncherModel(); struct Denied: Error {}
     denied.loadTargets = { throw Denied() }; await denied.open(frontPID:nil)
     try render(LauncherView(model:denied),"launcher-permission",dest)
+
+    // M-9: Enter before the window list loads is remembered and applied on arrival
+    let slow = LauncherModel()
+    slow.loadTargets = { try? await Task.sleep(nanoseconds:150_000_000); return [t,t2] }
+    let opening = Task { await slow.open(frontPID:nil) }
+    try await Task.sleep(nanoseconds:30_000_000)
+    slow.confirm(); precondition(slow.step == .window && slow.target == nil)
+    await opening.value
+    precondition(slow.step == .capability && slow.target == t, "pending confirm applied")
+    let stale = LauncherModel()
+    stale.loadTargets = { try? await Task.sleep(nanoseconds:100_000_000); return [t] }
+    let staleOpen = Task { await stale.open(frontPID:nil) }
+    try await Task.sleep(nanoseconds:30_000_000)
+    stale.confirm(); stale.close()
+    await staleOpen.value
+    precondition(stale.step == .window && stale.target == nil && !stale.visible, "closed launcher drops pending confirm")
 
     // 9. panel lifecycle without keystrokes: show -> visible, close -> hidden; resign key closes
     let panelModel = LauncherModel(); panelModel.loadTargets = { [t,t2] }

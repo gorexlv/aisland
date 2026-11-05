@@ -50,28 +50,36 @@ enum LauncherStep { case window, capability, ready }
     var capabilityRows: [DuckCapability] { target.map { launcherFilteredCapabilities(duckCapabilities(for: $0), query: query) } ?? [] }
     private var rowCount: Int { step == .window ? windowRows.count : step == .capability ? capabilityRows.count : 0 }
     private var generation = 0
+    private var loading = false
+    private var pendingConfirm = false
     @Published var permissionError = false
     func reset() {
         generation += 1
+        pendingConfirm = false; loading = false
         step = .window; query = ""; targets = []; frontID = nil; target = nil; capability = nil; highlight = 0; status = ""; permissionError = false; visible = true
     }
     func open(frontPID: pid_t?) async {
         reset(); let current = generation
+        loading = true
         let loaded: [ScreenTarget]
         do { loaded = try await loadTargets() } catch {
             guard current == generation, visible else { return }
+            loading = false; pendingConfirm = false
             status = "请允许Mo · 墨录制屏幕后重试"; permissionError = true; return
         }
         guard current == generation, visible else { return }
+        loading = false
         targets = loaded
         if targets.isEmpty { status = "没有可选窗口，请打开应用后重试"; return }
         if let frontPID { frontID = frontmostWindowID(pid: frontPID, among: targets) }
         highlight = 0
+        if pendingConfirm { pendingConfirm = false; confirm() }
     }
     func move(_ delta: Int) { highlight = max(0, min(highlight + delta, max(rowCount - 1, 0))) }
     func confirm() {
         switch step {
         case .window:
+            if loading { pendingConfirm = true; return }
             guard windowRows.indices.contains(highlight) else { return }
             target = windowRows[highlight]; query = ""; step = .capability; highlight = 0
         case .capability:
@@ -239,6 +247,8 @@ struct LauncherView: View {
     func hide() {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []; resize = nil
-        panel?.orderOut(nil); panel?.contentView = nil; panel = nil
+        guard let old = panel else { return }
+        panel = nil; old.orderOut(nil)
+        DispatchQueue.main.async { old.contentView = nil }
     }
 }
