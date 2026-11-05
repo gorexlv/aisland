@@ -80,6 +80,7 @@ struct ReviewOrbitView: View {
                     Button(model.inputMode == .audio ? "切换文字框选" : "切换语音框选") { Task { await model.setInputMode(model.inputMode == .audio ? .text : .audio) } }.disabled(model.busy || live.active)
                     Button("截取新画面") { model.pause() }.disabled(!model.canSwitchSnapshots)
                     Button("完成并查看历史（\(model.snapshots.count)）") { model.completeReview() }.disabled(model.busy || model.snapshots.isEmpty)
+                    if model.snapshots.isEmpty { Button("恢复最近批阅") { model.onRestoreRequest?() }.disabled(model.busy) }
                     Divider()
                     Button("保存并关闭批阅") { model.close() }.disabled(model.busy)
                 }.position(x:64,y:84)

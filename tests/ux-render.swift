@@ -26,6 +26,11 @@ try MainActor.assumeIsolated {
     try renderFixture(IslandView(model:model),"meeting",NSSize(width:494,height:484))
     model.showMenu = true
     try renderFixture(IslandView(model:model),"recording-menu",NSSize(width:360,height:214))
+    // Menu keeps only the meeting button; SwiftUI exposes no accessibility tree headless, so check the view source.
+    let islandSource = try String(contentsOfFile:"main.swift",encoding:.utf8)
+    let menuStart = islandSource.range(of:"if model.showMenu {")!, menuEnd = islandSource.range(of:"} else if model.screenReader.visible {",range:menuStart.upperBound..<islandSource.endIndex)!
+    let menuSource = String(islandSource[menuStart.upperBound..<menuEnd.lowerBound])
+    precondition(menuSource.contains(".accessibilityLabel(\"会议\")") && !menuSource.contains("\"读屏\"") && !menuSource.contains("\"批阅\""))
     model.showMenu = false; model.recording = false
     model.transcript = String(repeating:"[12:02] 我的麦克风：虚构长文字，阅读和选择不应被保存详情挤压。\n",count:30)
     model.savedNoteName = String(repeating:"虚构长标题",count:15)

@@ -1,5 +1,6 @@
 import Cocoa
 import Combine
+import ScreenCaptureKit
 import SwiftUI
 
 struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: String; let date: Date }
@@ -206,7 +207,8 @@ struct WindowOCRRecordView: View {
     var latestText: String { reader.text }
     func attach(_ item: ScreenTarget, note: String) async -> Bool {
         guard !active else { status = "请先结束当前读屏"; return false }
-        do { _ = try await resolveScreenWindow(item) } catch { status = error.localizedDescription; return false }
+        let window: SCWindow
+        do { window = try await resolveScreenWindow(item) } catch { status = error.localizedDescription; return false }
         token = UUID()
         target = item; self.note = note; active = true
         records = []; speakingEnabled = false
@@ -214,6 +216,7 @@ struct WindowOCRRecordView: View {
         tracking = Timer.scheduledTimer(withTimeInterval:0.8,repeats:true) { [weak self] _ in
             Task { @MainActor in await self?.track() }
         }
+        panels.position(window.frame)
         reframe()
         return true
     }
