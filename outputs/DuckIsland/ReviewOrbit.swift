@@ -66,25 +66,7 @@ struct ReviewOrbitView: View {
                     .position(x:37,y:105).zIndex(1)
             }
             Button { model.toggleSinglePage() } label: {
-                TimelineView(.animation(minimumInterval:1/30,paused:reduceMotion)) { context in
-                    let time = context.date.timeIntervalSinceReferenceDate
-                    let phase = reduceMotion ? 0.5 : (sin(time*2.5)+1)/2
-                    ZStack {
-                        Circle().stroke(ringColor.opacity(0.25+phase*0.40),lineWidth:7).frame(width:62,height:62).blur(radius:4).scaleEffect(1+phase*0.12)
-                        Circle().stroke(ringColor.opacity(0.25),lineWidth:1).frame(width:72,height:72)
-                        Circle().trim(from:0,to:0.25).stroke(ringColor,style:StrokeStyle(lineWidth:3,lineCap:.round)).frame(width:66,height:66)
-                            .rotationEffect(.degrees(reduceMotion ? -60 : time.truncatingRemainder(dividingBy:5)*72))
-                        Circle().stroke(ringColor.opacity(0.7+phase*0.3),lineWidth:2).frame(width:62,height:62)
-                        Circle().fill(colorScheme == .dark ? Color(red:0.16,green:0.23,blue:0.30) : Color(red:0.14,green:0.18,blue:0.23)).frame(width:58,height:58)
-                        VStack(spacing:1) {
-                            MoDigitalAvatar(listening:voice.dictating || live.ready)
-                                .frame(width:40,height:40)
-                                .offset(y:reduceMotion ? 0 : sin(time*1.8)*0.6)
-                            Text("Mo").font(.system(size:9,weight:.semibold,design:.rounded)).foregroundStyle(.white)
-                        }.accessibilityHidden(true)
-                        if model.busy { ProgressView().controlSize(.mini).offset(x:20,y:-20) }
-                    }
-                }.frame(width:76,height:76).contentShape(Circle())
+                MoOrb(ringColor:ringColor,busy:model.busy,listening:voice.dictating || live.ready)
             }.disabled(model.busy || model.historyPresented)
                 .accessibilityLabel(model.paused ? "退出批阅模式" : "进入批阅模式并截图")
                 .help("点击进入／退出批阅；拖动移动呼吸灯 · \(model.shortcutHint ?? "")")
@@ -115,6 +97,35 @@ struct ReviewOrbitView: View {
 
 
         }.frame(width:128,height:124).buttonStyle(.plain)
+    }
+}
+
+struct MoOrb: View {
+    let ringColor: Color
+    let busy: Bool
+    let listening: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        TimelineView(.animation(minimumInterval:1/30,paused:reduceMotion)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+            let phase = reduceMotion ? 0.5 : (sin(time*2.5)+1)/2
+            ZStack {
+                Circle().stroke(ringColor.opacity(0.25+phase*0.40),lineWidth:7).frame(width:62,height:62).blur(radius:4).scaleEffect(1+phase*0.12)
+                Circle().stroke(ringColor.opacity(0.25),lineWidth:1).frame(width:72,height:72)
+                Circle().trim(from:0,to:0.25).stroke(ringColor,style:StrokeStyle(lineWidth:3,lineCap:.round)).frame(width:66,height:66)
+                    .rotationEffect(.degrees(reduceMotion ? -60 : time.truncatingRemainder(dividingBy:5)*72))
+                Circle().stroke(ringColor.opacity(0.7+phase*0.3),lineWidth:2).frame(width:62,height:62)
+                Circle().fill(colorScheme == .dark ? Color(red:0.16,green:0.23,blue:0.30) : Color(red:0.14,green:0.18,blue:0.23)).frame(width:58,height:58)
+                VStack(spacing:1) {
+                    MoDigitalAvatar(listening:listening)
+                        .frame(width:40,height:40)
+                        .offset(y:reduceMotion ? 0 : sin(time*1.8)*0.6)
+                    Text("Mo").font(.system(size:9,weight:.semibold,design:.rounded)).foregroundStyle(.white)
+                }.accessibilityHidden(true)
+                if busy { ProgressView().controlSize(.mini).offset(x:20,y:-20) }
+            }
+        }.frame(width:76,height:76).contentShape(Circle())
     }
 }
 
