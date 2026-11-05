@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, 'ci/**']
-    tags: ['*'] # Every tag is validated; malformed tags fail instead of becoming releases.
+    tags: ['**'] # Include slash-containing tags so malformed tags also fail validation.
   workflow_dispatch: # Validation/build only, even when a tag is selected in the UI.
 
 permissions:
