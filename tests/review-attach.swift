@@ -36,6 +36,13 @@ Task { @MainActor in
     try await ReviewStore().save(ReviewSavePayload(session:session,originals:[shotID:png],text:"x"),folder:root.appendingPathComponent("2026-a"))
     await model.restoreLatestStandalone()
     precondition(model.active && model.intentNote == "看标题" && model.snapshots.count == 1, model.status)
+    model.intentNote = "看标题"
+    try await model.persist()
+    let saved = try String(contentsOf:root.appendingPathComponent("2026-a/review.txt"),encoding:.utf8)
+    precondition(saved.contains("意图：看标题"), saved)
+    model.picking = false
+    let again = await model.attach(fixture,note:"另一个")
+    precondition(!again && model.status == "请先结束当前批阅" && !model.picking && model.intentNote == "看标题")
     model.panels.close()
     print("PASS: review attach")
     exit(0)

@@ -255,12 +255,12 @@ enum ReviewInputMode { case text, audio }
         token = UUID()
     }
     func attach(_ item: ScreenTarget, note: String) async -> Bool {
-        let fresh = !active
-        if fresh { resetForStart(); busy = false; target = nil }
-        picking = true; intentNote = note
+        guard !active, !busy else { status = "请先结束当前批阅"; return false }
+        resetForStart(); busy = false; target = nil
+        intentNote = note.trimmingCharacters(in:.whitespacesAndNewlines)
         await choose(item)
         if target?.id == item.id && !picking { return true }
-        if fresh { token = UUID(); active = false; picking = false; intentNote = "" }
+        token = UUID(); active = false; picking = false; intentNote = ""
         return false
     }
     func restoreLatestStandalone() async {
