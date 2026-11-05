@@ -1,6 +1,6 @@
 # CI / tag Release 验证记录
 
-日期：2026-11-05；基线 `ff8e344cf55602a8d4ffff380f01c5079d4c53fc`。本工作仅新增发布基础设施、README 和 Python 缓存忽略项，未修改应用交互、视觉资源、本地 build/sign-local 脚本或签名材料。
+日期：2026-11-05；基线 `ff8e344cf55602a8d4ffff380f01c5079d4c53fc`。本工作新增发布基础设施、README 和 Python 缓存忽略项，并修正既有会议测试的异步等待；未修改应用交互、视觉资源、本地 build/sign-local 脚本或签名材料。
 
 ## 设计与边界
 
@@ -45,3 +45,9 @@ lint 工具下载到 `/tmp/aisland-ci-tools`（actionlint 1.7.12 / shellcheck 0.
 - [Apple Gatekeeper 说明](https://support.apple.com/en-us/102445)：ad-hoc 不等于可信 Developer ID/公证，下载可能被系统阻止。
 
 正式 tag 发布没有实际执行；测试与普通 CI 构建不代表已完成真实 Release 端到端发布。
+
+## 远端发现与修复
+
+首轮 [41948133639](https://github.com/gorexlv/aisland/actions/runs/41948133639) 全部通过，release 按分支事件跳过；日志确认 runner 为 arm64、Xcode 16.4、macOS SDK 15.5，APP_STORE 条件及 NotesHelper 复制均存在，产物上传成功。排队中的中间提交运行被更新提交替代而取消，不计成功。
+
+后续 [41948471177](https://github.com/gorexlv/aisland/actions/runs/41948471177) 在既有 meeting/main.swift:126 的 UI 文本回调断言失败（exit 133），其余此前执行的套件通过；没有发布。原测试在异步 DispatchQueue 发布后只给 RunLoop 固定 60ms 时间片，时间片并非回调完成屏障。改为复用已有有界条件等待（最多 2s）等待真实回调，继续严格验证只发布一次且仅含新会话文字，并补充失败诊断；没有改变生产行为、跳过测试或自动重试掩盖失败。本地原版 100 次未复现，故不声称已在本地稳定复现托管 runner 调度问题，修复需以新远端结果验证。
