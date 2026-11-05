@@ -58,10 +58,10 @@ func sentenceCount(_ text: String) -> Int {
     @Published var notchHeight: CGFloat = 38
     private var capture: MeetingCapture?
     private let recognition: MeetingRecognition
-    private var title = ""
+    private(set) var title = ""
     private var backupURL: URL?
     private var lastBackup = Date.distantPast
-    private var warning = ""
+    private(set) var warning = ""
     var count: Int { sentenceCount(transcript) }
 
     init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil) {
@@ -70,6 +70,9 @@ func sentenceCount(_ text: String) -> Int {
         self.review = review ?? ReviewModel()
         self.screenReader.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onNotice = { [weak self] text in self?.notify(text) }
+        self.review.panels.islandExtraHeight = { [weak self] in
+            guard let self else { return 0 }; return (self.recording ? 44 : 0) + (self.toast.isEmpty ? 0 : 44)
+        }
         screenChanges = self.screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         recognition.onAudioStatus = { [weak self] status in self?.audioStatus = status }
         recognition.onText = { [weak self] text in
@@ -456,11 +459,11 @@ private struct DuckMascot: View {
             let breath = sin(time * 1.8)
             Image(nsImage: MascotAssets.images["duck"]!)
                 .resizable().interpolation(.high).scaledToFit()
-                .frame(width:36,height:36)
+                .frame(width:23,height:23)
                 .rotationEffect(.degrees(reduceMotion ? 0 : breath * 3 + (hovering ? -7 : 0)))
                 .offset(y:reduceMotion ? 0 : breath * 0.9)
                 .scaleEffect(reduceMotion ? 1 : (hovering ? 1.08 : 1) + breath * 0.015 + (recording ? min(max(level,0),1) * 0.08 : 0))
-                .frame(width:40,height:38)
+                .frame(width:32,height:30)
         }
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .spring(response:0.35,dampingFraction:0.6),value:hovering)
@@ -482,7 +485,7 @@ private struct DuckButtonStyle: ButtonStyle {
 struct IslandView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: Recorder
-    let yellow = Color(red: 1, green: 0.82, blue: 0.23)
+    let yellow = Color(white:0.78)
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -501,22 +504,18 @@ struct IslandView: View {
                                     .frame(width: 3, height: model.recording ? 4 + model.level * CGFloat([12, 20, 10, 16, 8][index]) : CGFloat([7, 13, 19, 13, 7][index]))
                             }
                         }.frame(height: 26).animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.level)
-                        if model.count > 0 || model.recording {
-                            Text("\(model.count)").font(.system(size: 16, weight: .medium, design: .rounded)).monospacedDigit()
-                                .contentTransition(.numericText()).animation(reduceMotion ? nil : .spring(), value: model.count)
-                            Text("句").font(.system(size: 10)).foregroundStyle(.gray)
-                        }
+                        if model.recording { Image(systemName:"record.circle.fill").foregroundStyle(.red).font(.system(size:10)) }
                     }.foregroundStyle(yellow).frame(width: 84)
-                }.buttonStyle(.plain).help("展开或收起文字 · 按标点估算句数")
+                }.buttonStyle(.plain).help("展开或收起会议文字").accessibilityLabel("展开或收起会议文字")
             }.frame(height: model.notchHeight + 2)
-            if model.recording {
+            if model.recording && (model.showMenu || model.screenReader.visible || !model.expanded) {
                 HStack(spacing:12) {
                     TimelineView(.periodic(from:.now,by:1)) { context in
                         let seconds = Int(context.date.timeIntervalSince(model.recordingStartedAt ?? context.date))
                         Text(String(format:"录制中 · %02d:%02d",max(0,seconds)/60,max(0,seconds)%60)).monospacedDigit()
                     }
                     Button("结束会议") { Task { await model.stopMeeting() } }
-                        .disabled(model.busy).buttonStyle(.borderedProminent).tint(.red)
+                        .disabled(model.busy).buttonStyle(.borderedProminent).tint(.gray)
                 }.font(.system(size:12)).padding(8).background(.black,in:Capsule())
             }
             if !model.toast.isEmpty {
@@ -556,61 +555,17 @@ struct IslandView: View {
             } else if model.screenReader.visible {
                 ScreenReaderView(reader: model.screenReader)
             } else if model.expanded {
-                Rectangle().fill(.white.opacity(0.09)).frame(height: 1).padding(.horizontal, 22)
-                HStack {
-                    Button("最近记录与任务") { model.showRecentRecords() }
-                    Button("查看会议结果") { model.showMeetingResult() }.disabled(model.transcript.isEmpty)
-                }.font(.system(size: 11)).foregroundStyle(yellow).padding(.top, 8)
-                #if !APP_STORE
-                Toggle("自动生成 AI 总结", isOn: Binding(get: { model.automaticSummary }, set: { model.setAutomaticSummary($0) }))
-                    .font(.system(size: 11)).padding(.horizontal, 22)
-                #endif
-                Text(model.audioStatus).font(.system(size: 11, weight: .medium)).foregroundStyle(model.recording ? yellow : .gray)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.top, 12)
-                TranscriptReader(text:model.transcript.isEmpty ? "正在等待会议文字…" : model.transcript)
-                    .frame(height:138).padding(22)
-                if !model.recording && !model.busy && !model.processing && !model.transcript.isEmpty {
-                    if !model.savedNoteName.isEmpty {
-                        Button(action: model.openSavedNote) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "note.text")
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(model.savedNoteName).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                                    Text(model.savedNoteFolder + " · 点击打开").font(.system(size: 10)).foregroundStyle(.gray)
-                                }
-                                Spacer()
-                                Image(systemName: "arrow.up.right").font(.system(size: 10))
-                            }.padding(10).background(yellow.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-                        }.buttonStyle(.plain).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 10)
-                    }
-                    HStack {
-                        Button(model.noteSaved ? (model.localBackupSaved ? "已写入备忘录" : "重试保存") : "写入备忘录") { model.saveToNotes() }.disabled(model.noteSaved && model.localBackupSaved)
-                        #if !APP_STORE
-                        if !model.analysisError.isEmpty {
-                            Button("重试总结") { model.retryAnalysis() }.help(model.analysisError)
-                        }
-                        #endif
-                        Spacer()
-                        Button(model.localBackupSaved ? "本地文字备份" : "重试本地备份") { model.revealBackup() }
-                    }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 12)
-                }
-                HStack(spacing: 7) {
-                    Circle().fill(model.recording ? yellow : .gray).frame(width: 5, height: 5)
-                    Text(model.message).font(.system(size: 10)).foregroundStyle(.gray).lineLimit(3)
-                    Spacer()
-                    Button(model.copied ? "已复制原文" : "复制原文") { model.copy() }.disabled(model.transcript.isEmpty)
-                    Button { withAnimation { model.expanded = false; model.showMenu = false } } label: { Image(systemName: "chevron.up") }.accessibilityLabel("收起会议面板")
-                }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(yellow).padding(.horizontal, 22).padding(.bottom, 18)
+                MeetingPane(model:model)
             }
         }
-        .frame(width: model.screenReader.visible && !model.showMenu ? max(420, model.notchWidth + 180) : (model.expanded && !model.showMenu ? max(460, model.notchWidth + 180) : model.notchWidth + 180))
+        .frame(width: model.screenReader.visible && !model.showMenu ? max(494, model.notchWidth + 180) : (model.expanded && !model.showMenu ? max(494, model.notchWidth + 180) : model.notchWidth + 180))
         .background(alignment: .top) {
             UnevenRoundedRectangle(topLeadingRadius: 0,
                 bottomLeadingRadius: model.expanded && !model.showMenu ? 28 : 18,
                 bottomTrailingRadius: model.expanded && !model.showMenu ? 28 : 18,
                 topTrailingRadius: 0)
                 .fill(.black)
-                .frame(height: model.showMenu || (!model.expanded && !model.screenReader.visible) ? model.notchHeight + 2 : nil)
+                .frame(width:model.notchWidth+180,height:model.notchHeight + 2)
         }
         .frame(maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
@@ -624,6 +579,107 @@ struct IslandView: View {
             Button("退出小鸭") { NSApp.terminate(nil) }
         }
     }
+}
+
+struct MeetingPane: View {
+    @ObservedObject var model: Recorder
+    @State private var settings = false
+    @State private var recovery = false
+    var body: some View {
+        VStack(spacing:0) {
+            HStack {
+                Text(model.title.isEmpty ? "会议记录" : model.title).font(.system(size:14,weight:.semibold)).lineLimit(1).help(model.title)
+                Spacer(minLength:8)
+                ToolButton(title:"最近记录与任务",symbol:"clock.arrow.circlepath",action:model.showRecentRecords)
+                ToolButton(title:"会议结果",symbol:"doc.text",action:model.showMeetingResult).disabled(model.transcript.isEmpty)
+                ToolButton(title:"会议设置",symbol:"gearshape") { settings.toggle() }
+                    .popover(isPresented:$settings) {
+                        MeetingSettings(model:model)
+                    }
+                ToolButton(title:"收起会议面板",symbol:"chevron.up") { model.expanded = false }
+            }.padding(14)
+            Divider().overlay(IslandStyle.line)
+            HStack(spacing:8) {
+                Image(systemName:model.recording ? "record.circle.fill" : "waveform").foregroundStyle(model.recording ? Color.red : IslandStyle.secondary)
+                Text(model.recording ? "录制中" : (model.busy || model.processing ? "处理中" : "会议记录"))
+                if model.recording { MeetingTimer(model:model) }
+                Spacer()
+                if model.recording {
+                    Button { Task { await model.stopMeeting() } } label: { Label("结束会议",systemImage:"stop.fill") }
+                        .buttonStyle(.bordered).disabled(model.busy)
+                } else if model.busy || model.processing { ProgressView().controlSize(.small) }
+            }.font(.system(size:12)).padding(.horizontal,16).padding(.vertical,10)
+            HStack(spacing:8) {
+                Image(systemName:"mic"); Image(systemName:"hifispeaker")
+                Text(model.audioStatus).lineLimit(2)
+                Spacer(minLength:0)
+            }.font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(.horizontal,18).padding(.top,8)
+            TranscriptReader(text:model.transcript.isEmpty ? (model.recording ? "正在聆听…" : "暂无会议文字") : compactTranscript(model.transcript))
+                .frame(height:238).padding(18)
+            Divider().overlay(IslandStyle.line)
+            HStack(spacing:8) {
+                Label(model.localBackupSaved ? "本地已保存" : (model.transcript.isEmpty ? "暂无文字" : "本地待保存"),systemImage:model.localBackupSaved ? "checkmark" : "clock")
+                Spacer(minLength:0)
+                Button { recovery.toggle() } label: {
+                    Label(model.message.contains("失败") || !model.warning.isEmpty ? "需要处理" : (model.noteSaved ? "备忘录已同步" : "备忘录未同步"),systemImage:"chevron.right")
+                }.buttonStyle(.plain).popover(isPresented:$recovery) { MeetingRecovery(model:model) }
+                ToolButton(title:model.copied ? "已复制原文" : "复制原文",symbol:model.copied ? "checkmark" : "doc.on.doc",action:{model.copy()}).disabled(model.transcript.isEmpty)
+            }.font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(.horizontal,14).padding(.vertical,8)
+        }.modifier(IslandSurface())
+    }
+}
+struct MeetingSettings: View {
+    @ObservedObject var model:Recorder
+    var body: some View {
+        VStack(alignment:.leading,spacing:16) {
+            Text("会议设置").font(.headline)
+            #if !APP_STORE
+            Toggle("结束后生成 AI 总结",isOn:Binding(get:{model.automaticSummary},set:{model.setAutomaticSummary($0)}))
+            Text("开启时会确认授权；关闭后不发送会议文字。").font(.system(size:12)).foregroundStyle(.secondary)
+            #else
+            Text("会议文字保存在本机，可同步到备忘录。").font(.system(size:13))
+            #endif
+        }.padding(18).frame(width:300).modifier(IslandSurface())
+    }
+}
+struct MeetingTimer: View {
+    @ObservedObject var model: Recorder
+    var body: some View {
+        TimelineView(.periodic(from:.now,by:1)) { context in
+            let seconds = max(0,Int(context.date.timeIntervalSince(model.recordingStartedAt ?? context.date)))
+            Text(String(format:"%02d:%02d",seconds/60,seconds%60)).monospacedDigit()
+        }
+    }
+}
+struct MeetingRecovery: View {
+    @ObservedObject var model: Recorder
+    var body: some View {
+        VStack(alignment:.leading,spacing:14) {
+            Text("保存与恢复").font(.headline)
+            ScrollView { Text([model.message,model.warning,model.analysisError].filter{!$0.isEmpty}.joined(separator:"\n\n")).font(.system(size:13)).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading) }.frame(maxHeight:150)
+            if !model.savedNoteName.isEmpty { Button("打开备忘录") { model.openSavedNote() } }
+            Button(model.localBackupSaved ? "查看本地文字" : "重试本地保存") { model.revealBackup() }.disabled(model.transcript.isEmpty || model.busy)
+            Button("重试保存与同步") { model.saveToNotes() }.disabled(model.recording || model.busy || model.transcript.isEmpty || (model.noteSaved && model.localBackupSaved))
+            #if !APP_STORE
+            if !model.analysisError.isEmpty { Button("重试 AI 总结") { model.retryAnalysis() }.disabled(model.busy) }
+            #endif
+            Button("最近记录与任务") { model.showRecentRecords() }
+        }.padding(18).frame(width:340).modifier(IslandSurface())
+    }
+}
+// Presentation only: keep the original source-labelled transcript for copy/export.
+func compactTranscript(_ text:String) -> String {
+    var previous = ""
+    return text.components(separatedBy:"\n").map { line in
+        guard let end = line.range(of:"] "), line.hasPrefix("[") else { return line }
+        let rest = String(line[end.upperBound...])
+        guard let source = ["会议声音","我的麦克风"].first(where:{rest.hasPrefix($0 + "：")}) else { return line }
+        let stamp = String(line[..<end.lowerBound]).dropFirst()
+        let content = String(rest.dropFirst(source.count+1))
+        let header = source == previous ? "" : (previous.isEmpty ? "" : "\n") + (source == "会议声音" ? "系统声音" : "麦克风") + "\n"
+        previous = source
+        return header + stamp + "  " + content
+    }.joined(separator:"\n\n")
 }
 
 struct MascotButtonStyle: ButtonStyle {
@@ -717,9 +773,10 @@ final class IslandPanel: NSPanel {
         model.notchHeight = max(32, screen.safeAreaInsets.top)
         let isExpanded = expanded ?? model.expanded
         let screenReader = model.screenReader.visible && !(menu ?? model.showMenu)
-        let width = screenReader ? max(420, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(460, notch + 180) : notch + 180)
-        let height = model.notchHeight + ((menu ?? model.showMenu) ? 138 : (screenReader ? 306 : (isExpanded ? 408 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording ? 44 : 0)
+        let width = screenReader ? max(494, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(494, notch + 180) : notch + 180)
+        let height = model.notchHeight + ((menu ?? model.showMenu) ? 138 : (screenReader ? model.screenReader.panelHeight : (isExpanded ? 452 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording && ((menu ?? model.showMenu) || screenReader || !isExpanded) ? 44 : 0)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
+        if model.review.active { model.review.panels.positionSidebar(.zero) }
     }
     @objc private func quickReadScreen() { model.quickReadScreen() }
     @objc func spaceChanged() { panel.orderFrontRegardless() }

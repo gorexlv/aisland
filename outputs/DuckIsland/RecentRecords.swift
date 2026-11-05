@@ -86,24 +86,25 @@ enum RecentRecords {
     }
     private func makeWindow<V: View>(_ title: String, view: V) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 580), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named:.darkAqua)
         window.title = title; window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: view); window.center()
         return window
     }
 }
-private struct RecentRecordsView: View {
+struct RecentRecordsView: View {
     @ObservedObject var model: RecordWindows
     var body: some View {
         VStack(alignment: .leading) {
             HStack { Text("最近记录").font(.title2); Spacer(); Button("刷新") { model.refresh() } }
-            Text("仅显示此 Mac 的本地文字。历史备忘录同步状态未知；批阅历史仅供查看，继续编辑请使用批阅中的恢复入口。")
+            Text("本地记录 · 同步状态请查看任务详情")
                 .font(.caption).foregroundStyle(.secondary)
-            if !model.loadError.isEmpty { Text(model.loadError).foregroundStyle(.red) }
+            if !model.loadError.isEmpty { StatusDetails(title:"无法读取记录",detail:model.loadError) }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     ForEach(model.jobs.keys.sorted(by: { $0.uuidString < $1.uuidString }), id: \.self) { id in
                         VStack(alignment: .leading) {
-                            Text(model.jobs[id] ?? "").textSelection(.enabled)
+                            StatusDetails(title:model.running.contains(id) ? "处理中" : "任务状态",detail:model.jobs[id] ?? "")
                             HStack {
                                 if let result = model.jobResults[id] { Button("查看结果 / 复制") { result() } }
                                 if let retry = model.retries[id] { Button("重试保存 / 同步") { retry() } }
@@ -111,7 +112,7 @@ private struct RecentRecordsView: View {
                                 if let retry = model.summaryRetries[id] { Button("重试 AI 总结") { retry() } }
                                 #endif
                             }
-                        }.padding().frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.08))
+                        }.padding().frame(maxWidth: .infinity, alignment: .leading).background(Color.white.opacity(0.04))
                     }
                     if model.records.isEmpty { Text("暂无本地记录。完成会议、读屏或批阅保存后，可在这里找回。") }
                     ForEach(model.records) { record in
@@ -128,10 +129,10 @@ private struct RecentRecordsView: View {
                     }
                 }
             }
-        }.padding(20).frame(minWidth: 580, minHeight: 400)
+        }.padding(20).frame(minWidth: 580, minHeight: 400).modifier(IslandSurface())
     }
 }
-private struct RecordResultView: View {
+struct RecordResultView: View {
     let sections: RecordSections
     @State private var selected = 0
     @State private var feedback = ""
@@ -140,7 +141,7 @@ private struct RecordResultView: View {
     var body: some View {
         VStack(alignment: .leading) {
             Picker("查看内容", selection: $selected) { Text("原文").tag(0); Text("总结").tag(1); Text("待办").tag(2) }.pickerStyle(.segmented)
-            ScrollView { Text(text.isEmpty ? "暂无\(label)。未生成或旧记录未包含此内容。" : text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(8) }
+            ScrollView { Text(text.isEmpty ? "暂无\(label)。未生成或旧记录未包含此内容。" : text).font(.system(size:14)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(8) }
             HStack {
                 Button("复制" + label) {
                     NSPasteboard.general.clearContents()
@@ -148,6 +149,52 @@ private struct RecordResultView: View {
                 }.disabled(text.isEmpty)
                 Text(feedback).font(.caption)
             }
-        }.padding(20).frame(minWidth: 520, minHeight: 360).onChange(of: selected) { feedback = "" }
+        }.padding(20).frame(minWidth: 520, minHeight: 360).modifier(IslandSurface()).onChange(of: selected) { feedback = "" }
+    }
+}
+
+// Native A palette shared by the island, tools, and saved results.
+enum IslandStyle {
+    static let surface = Color(red:0.137,green:0.145,blue:0.161)
+    static let secondary = Color(red:0.65,green:0.67,blue:0.71)
+    static let line = Color.white.opacity(0.09)
+}
+struct IslandSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        content.foregroundStyle(.white).tint(.blue)
+            .background(IslandStyle.surface,in:RoundedRectangle(cornerRadius:15))
+            .overlay(RoundedRectangle(cornerRadius:15).strokeBorder(.white.opacity(0.13),lineWidth:1))
+            .preferredColorScheme(.dark)
+    }
+}
+struct ToolButton: View {
+    let title: String
+    let symbol: String
+    let action: () -> Void
+    var body: some View {
+        Button(action:action) { Image(systemName:symbol).font(.system(size:14)).frame(width:28,height:28).contentShape(Rectangle()) }
+            .buttonStyle(.plain).help(title).accessibilityLabel(title)
+    }
+}
+struct StatusDetails: View {
+    let title: String
+    let detail: String
+    @State private var showing = false
+    var body: some View {
+        Button { showing.toggle() } label: { Label(title,systemImage:"info.circle").lineLimit(1) }
+            .buttonStyle(.plain).help("查看状态详情").accessibilityLabel(title + "，查看详情")
+            .popover(isPresented:$showing) {
+                ScrollView { Text(detail).textSelection(.enabled).font(.system(size:13)).frame(maxWidth:.infinity,alignment:.leading).padding(16) }
+                    .frame(width:360,height:200).preferredColorScheme(.dark)
+            }
+    }
+}
+
+struct PrimaryActionStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    func makeBody(configuration:Configuration) -> some View {
+        configuration.label.font(.system(size:13,weight:.medium)).padding(.horizontal,12).padding(.vertical,8)
+            .foregroundStyle(enabled ? Color.white : IslandStyle.secondary)
+            .background(enabled ? Color.blue.opacity(configuration.isPressed ? 0.7 : 1) : Color.white.opacity(0.06),in:RoundedRectangle(cornerRadius:7))
     }
 }

@@ -22,7 +22,7 @@ class IslandPanel: NSPanel {}
         let bitmap = NSBitmapImageRep(data:firstMarked)!
         let badgeColor = bitmap.colorAt(x:15,y:15)!.usingColorSpace(.deviceRGB)!
         let outsideColor = bitmap.colorAt(x:90,y:90)!.usingColorSpace(.deviceRGB)!
-        assert(badgeColor.redComponent > 0.9 && badgeColor.greenComponent < 0.8 && badgeColor.blueComponent < 0.1)
+        assert(badgeColor.blueComponent > badgeColor.redComponent && badgeColor.blueComponent > badgeColor.greenComponent)
         assert(outsideColor.redComponent > 0.95 && outsideColor.greenComponent > 0.95 && outsideColor.blueComponent > 0.95)
         let exportedRegions = try JSONDecoder().decode([ReviewRegion].self,from:Data(contentsOf:folder.appendingPathComponent("regions.json")))
         assert(exportedRegions.first?.id == region.id)

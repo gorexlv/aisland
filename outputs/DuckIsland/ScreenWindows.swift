@@ -1,4 +1,5 @@
 import Cocoa
+import SwiftUI
 import ScreenCaptureKit
 
 struct ScreenTarget: Codable, Identifiable, Equatable {
@@ -73,4 +74,22 @@ func captureDisplayRegion(displayID: UInt32, region: CGRect) async throws -> Dat
     let image = try await SCScreenshotManager.captureImage(contentFilter:filter,configuration:config)
     guard let data = NSBitmapImageRep(cgImage:image).representation(using:.png,properties:[:]) else { throw NotesFailure(detail:"无法读取屏幕区域") }
     return data
+}
+
+struct ScreenTargetRow: View {
+    let target: ScreenTarget
+    var body: some View {
+        HStack(spacing:12) {
+            if let icon = NSRunningApplication(processIdentifier:target.pid)?.icon {
+                Image(nsImage:icon).resizable().scaledToFit().frame(width:32,height:32)
+            } else { Image(systemName:"macwindow").font(.system(size:22)).frame(width:32,height:32).foregroundStyle(IslandStyle.secondary) }
+            VStack(alignment:.leading,spacing:4) {
+                Text(target.title.isEmpty ? target.app : target.title).font(.system(size:14)).lineLimit(2)
+                Text(target.app).font(.system(size:12)).foregroundStyle(IslandStyle.secondary)
+            }
+            Spacer(minLength:4)
+            Image(systemName:"chevron.right").font(.system(size:12)).foregroundStyle(IslandStyle.secondary)
+        }.frame(maxWidth:.infinity,alignment:.leading).padding(.vertical,9).contentShape(Rectangle())
+            .help(target.label).accessibilityElement(children:.combine)
+    }
 }

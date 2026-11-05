@@ -212,7 +212,7 @@ final class ScreenReadCanvas:NSView {
             NSGraphicsContext.saveGraphicsState(); NSBezierPath(rect:r).addClip()
             image?.draw(in:bounds,from:.zero,operation:.copy,fraction:1,respectFlipped:true,hints:nil)
             NSGraphicsContext.restoreGraphicsState()
-            NSColor.systemYellow.setStroke(); let border = NSBezierPath(rect:r); border.lineWidth = 3; border.stroke()
+            NSColor.systemBlue.setStroke(); let border = NSBezierPath(rect:r); border.lineWidth = 3; border.stroke()
         }
         let badge = NSRect(x:12,y:12,width:min(320,bounds.width-24),height:30)
         NSColor.black.withAlphaComponent(0.85).setFill(); NSBezierPath(roundedRect:badge,xRadius:7,yRadius:7).fill()
@@ -226,50 +226,65 @@ final class ScreenReadCanvas:NSView {
     }
 }
 
+extension ScreenReader {
+    var panelHeight:CGFloat { selected == nil ? 218 + min(240,CGFloat(max(1,targets.count))*64) : 440 }
+}
 struct ScreenReaderView:View {
     @ObservedObject var reader:ScreenReader
     var body:some View {
-        VStack(alignment:.leading,spacing:10) {
+        VStack(alignment:.leading,spacing:0) {
             HStack {
-                Text("🐨 " + (reader.selected == nil ? "选择读屏窗口" : (reader.resultLabel ?? reader.selected?.label ?? "屏幕框选"))).font(.system(size:12,weight:.medium)).lineLimit(1)
-                Spacer(minLength:0)
-                Button { reader.hide() } label:{Image(systemName:"chevron.up")}.help("收起读屏").accessibilityLabel("收起读屏面板")
-            }
-            Button("快捷框选屏幕区域") { reader.captureRegion() }.disabled(reader.busy)
+                Text("提取文字").font(.system(size:14,weight:.semibold))
+                Spacer()
+                ToolButton(title:"最近记录",symbol:"clock.arrow.circlepath") { RecordWindows.shared.show() }
+                ToolButton(title:"收起读屏面板",symbol:"chevron.up") { reader.hide() }
+            }.padding(14)
+            Divider()
+            HStack(spacing:12) {
+                Button { reader.captureRegion() } label: { Label("框选区域",systemImage:"viewfinder") }
+                    .buttonStyle(PrimaryActionStyle()).disabled(reader.busy).help("在屏幕上框选文字 · Esc 取消")
+                Text(reader.selected == nil ? "或选择一个窗口" : "屏幕模式").font(.system(size:12)).foregroundStyle(IslandStyle.secondary)
+                Spacer()
+            }.padding(18)
             if reader.selected == nil {
-                ScrollView {
-                    VStack(spacing:5) {
-                        ForEach(reader.targets) { target in
-                            Button { reader.select(target) } label: {
-                                HStack { Text(target.label).font(.system(size:12)).lineLimit(2); Spacer(); Image(systemName:"chevron.right") }
-                                    .padding(8).background(.white.opacity(0.06),in:RoundedRectangle(cornerRadius:8))
-                            }
-                        }
-                    }
-                }.frame(height:166)
                 HStack {
-                    if !reader.text.isEmpty { Button("返回上次结果") { reader.showLastResult() } }
-                    Button("刷新窗口") { reader.refresh() }.disabled(reader.busy)
-                    if reader.permissionError { Button("屏幕权限") { NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) } }
-                }.font(.system(size:11))
+                    Text("可用窗口").font(.system(size:12)).foregroundStyle(IslandStyle.secondary)
+                    Spacer()
+                    ToolButton(title:"刷新窗口",symbol:"arrow.clockwise") { reader.refresh() }.disabled(reader.busy)
+                }.padding(.horizontal,18)
+                ScrollView {
+                    VStack(spacing:0) {
+                        if reader.targets.isEmpty {
+                            Label(reader.busy ? "正在查找窗口…" : "暂无可用窗口",systemImage:"macwindow").font(.system(size:14)).foregroundStyle(IslandStyle.secondary).padding(18)
+                        }
+                        ForEach(reader.targets) { target in
+                            Divider()
+                            Button { reader.select(target) } label: { ScreenTargetRow(target:target) }
+                        }
+                    }.padding(.horizontal,18)
+                }.frame(height:min(240,CGFloat(max(1,reader.targets.count))*64))
             } else {
-                TextEditor(text:$reader.text).font(.system(size:13)).frame(height:120)
-                Text(reader.dirty ? "有未保存修改" : "文字已保存").font(.system(size:10))
+                Text(reader.resultLabel ?? reader.selected?.label ?? "屏幕区域").font(.system(size:12)).foregroundStyle(IslandStyle.secondary).lineLimit(2).padding(.horizontal,18)
+                TextEditor(text:$reader.text).font(.system(size:14)).scrollContentBackground(.hidden).frame(height:170).padding(12)
                 HStack {
                     Button("重新框选") { reader.capture() }.disabled(reader.busy)
                     Button("切换窗口") { reader.refresh() }.disabled(reader.busy)
                     Spacer()
-                    if reader.canRetrySave { Button("保存修改") { reader.save() } }
-                    Button("复制") { reader.copy() }.disabled(reader.text.isEmpty)
-                    Button("查看文件") { reader.reveal() }.disabled(reader.savedFile == nil)
-                }.font(.system(size:11))
+                    if reader.canRetrySave { Button("保存修改") { reader.save() }.buttonStyle(PrimaryActionStyle()) }
+                    ToolButton(title:"复制文字",symbol:"doc.on.doc") { reader.copy() }.disabled(reader.text.isEmpty)
+                    ToolButton(title:"查看本地文件",symbol:"folder") { reader.reveal() }.disabled(reader.savedFile == nil)
+                }.font(.system(size:12)).padding(.horizontal,18).padding(.bottom,10)
             }
+            Divider()
             HStack {
-                if reader.busy { ProgressView().controlSize(.mini) }
-                Text(reader.status).font(.system(size:10)).foregroundStyle(.gray).lineLimit(2)
-                if reader.selecting { Button("取消") { reader.cancel(); reader.status = "已取消框选" }.font(.system(size:10)) }
-            }
-        }.padding(16).buttonStyle(.plain).foregroundStyle(.yellow)
+                if reader.busy { ProgressView().controlSize(.small) }
+                StatusDetails(title:reader.dirty ? "修改未保存" : (reader.busy ? "处理中" : (reader.permissionError ? "需要屏幕权限" : (reader.status.contains("失败") ? "操作未完成" : (reader.selected == nil ? "选择窗口后框选" : "提取状态")))),detail:reader.status)
+                Spacer(minLength:4)
+                if reader.permissionError { Button("屏幕权限") { NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) } }
+                if reader.selected == nil && !reader.text.isEmpty { Button("上次结果") { reader.showLastResult() } }
+                if reader.selecting { Button("取消") { reader.cancel(); reader.status = "已取消框选" } }
+            }.font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(14)
+        }.buttonStyle(.plain).modifier(IslandSurface())
     }
 }
 

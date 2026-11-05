@@ -10,10 +10,10 @@ func annotatedReviewImage(_ snapshot: ReviewSnapshot, regions: [ReviewRegion]) -
         snapshot.image.draw(in:bounds)
         for region in regions {
             let rect = CGRect(x:region.rect.minX*bounds.width,y:(1-region.rect.maxY)*bounds.height,width:region.rect.width*bounds.width,height:region.rect.height*bounds.height)
-            NSColor.systemOrange.setStroke(); let path = NSBezierPath(rect:rect); path.lineWidth = 3; path.stroke()
+            NSColor.systemBlue.setStroke(); let path = NSBezierPath(rect:rect); path.lineWidth = 3; path.stroke()
             let badge = NSRect(x:rect.minX,y:rect.maxY-22,width:32,height:22)
-            NSColor.systemOrange.setFill(); badge.fill()
-            ("#\(region.number)" as NSString).draw(in:badge.insetBy(dx:3,dy:2),withAttributes:[.font:NSFont.boldSystemFont(ofSize:12),.foregroundColor:NSColor.black])
+            NSColor.systemBlue.setFill(); badge.fill()
+            ("#\(region.number)" as NSString).draw(in:badge.insetBy(dx:3,dy:2),withAttributes:[.font:NSFont.boldSystemFont(ofSize:12),.foregroundColor:NSColor.white])
         }
         return true
     }
@@ -174,13 +174,13 @@ func markedReviewPNG(_ png: Data, regions: [ReviewRegion]) throws -> Data {
           let context = CGContext(data:nil,width:image.width,height:image.height,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else { throw NotesFailure(detail:"无法绘制批阅图片") }
     let width = CGFloat(image.width), height = CGFloat(image.height)
     context.draw(image,in:CGRect(x:0,y:0,width:width,height:height))
-    context.setStrokeColor(CGColor(red:1,green:0.55,blue:0,alpha:1)); context.setLineWidth(3)
+    context.setStrokeColor(CGColor(red:0,green:0.478,blue:1,alpha:1)); context.setLineWidth(3)
     for region in regions {
         let rect = CGRect(x:region.rect.minX*width,y:(1-region.rect.maxY)*height,width:region.rect.width*width,height:region.rect.height*height)
         context.stroke(rect)
         let badge = CGRect(x:rect.minX,y:rect.maxY-22,width:32,height:22)
-        context.setFillColor(CGColor(red:1,green:0.55,blue:0,alpha:1)); context.fill(badge)
-        let attributes: [NSAttributedString.Key:Any] = [NSAttributedString.Key(kCTFontAttributeName as String):CTFontCreateWithName("Helvetica-Bold" as CFString,12,nil),NSAttributedString.Key(kCTForegroundColorAttributeName as String):CGColor(gray:0,alpha:1)]
+        context.setFillColor(CGColor(red:0,green:0.478,blue:1,alpha:1)); context.fill(badge)
+        let attributes: [NSAttributedString.Key:Any] = [NSAttributedString.Key(kCTFontAttributeName as String):CTFontCreateWithName("Helvetica-Bold" as CFString,12,nil),NSAttributedString.Key(kCTForegroundColorAttributeName as String):CGColor(gray:1,alpha:1)]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string:"#\(region.number)",attributes:attributes))
         context.textPosition = CGPoint(x:badge.minX+3,y:badge.minY+5); CTLineDraw(line,context)
     }
