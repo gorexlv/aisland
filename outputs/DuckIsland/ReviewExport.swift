@@ -87,6 +87,10 @@ struct StoredReviewSession: Codable {
     let shots: [StoredReviewShot]
     let regions: [ReviewRegion]
     let selectedID: UUID?
+    var intentNote: String? = nil
+}
+func reviewExportTitle(_ label: String, note: String) -> String {
+    note.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty ? label : label + "\n意图：" + note
 }
 struct ReviewSavePayload {
     let session: StoredReviewSession

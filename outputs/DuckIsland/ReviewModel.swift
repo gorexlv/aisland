@@ -50,6 +50,7 @@ enum ReviewInputMode { case text, audio }
     @Published var targets: [ScreenTarget] = []
     @Published var target: ScreenTarget?
     @Published var regions: [ReviewRegion] = []
+    @Published var intentNote = ""
     @Published var aiSummary = ""
     @Published var aiSummaryInput = ""
     @Published var summaryBusy = false
@@ -245,14 +246,35 @@ enum ReviewInputMode { case text, audio }
         guard transcriptFeed.last?.regionID != id, let region = regions.first(where:{$0.id == id}) else { return }
         transcriptFeed.append(ReviewTranscriptRecord(regionID:id,text:region.feedback))
     }
-    func start(autoSelect: Bool = true) {
-        if active { panels.showSidebar(); return }
+    private func resetForStart() {
         inputMode = .audio; speakingEnabled = false; listeningEnabled = true
         active = true; picking = true; busy = true; copied = false; completed = false; reviewNoteName = nil
-        clearAISummary(); live.messages = []; transcriptFeed = []
+        clearAISummary(); live.messages = []; transcriptFeed = []; intentNote = ""
         regions = []; snapshots = []; current = nil; selectedID = nil; saveFolder = nil
         undoStates = []; canUndo = false
-        token = UUID(); let session = token
+        token = UUID()
+    }
+    func attach(_ item: ScreenTarget, note: String) async -> Bool {
+        let fresh = !active
+        if fresh { resetForStart(); busy = false; target = nil }
+        picking = true; intentNote = note
+        await choose(item)
+        if target?.id == item.id && !picking { return true }
+        if fresh { token = UUID(); active = false; picking = false; intentNote = "" }
+        return false
+    }
+    func restoreLatestStandalone() async {
+        guard !active, !busy else { return }
+        busy = true; defer { busy = false }
+        do {
+            guard let root = try? (storageRoot ?? ReviewStore.defaultRoot()), let folder = try await store.latest(root:root) else { status = "没有可恢复的批阅"; return }
+            try await restore(folder:folder)
+        } catch { status = "恢复失败：\(error.localizedDescription)。原文件未修改" }
+    }
+    func start(autoSelect: Bool = true) {
+        if active { panels.showSidebar(); return }
+        resetForStart()
+        let session = token
         status = "正在扫描当前桌面…"; panels.showSidebar()
         Task {
             if let root = try? (storageRoot ?? ReviewStore.defaultRoot()) { recoveryFolder = try? await store.latest(root:root) }
@@ -626,7 +648,7 @@ enum ReviewInputMode { case text, audio }
             defer { busy = false }
             do {
                 try await persist()
-                try copyReview(target:target?.label ?? "窗口批阅",regions:regions,snapshots:snapshots)
+                try copyReview(target:reviewExportTitle(target?.label ?? "窗口批阅",note:intentNote),regions:regions,snapshots:snapshots)
                 copied = true
                 status = "已复制"
                 onNotice?("已复制")
@@ -660,8 +682,8 @@ enum ReviewInputMode { case text, audio }
             let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             saveFolder = try (storageRoot ?? ReviewStore.defaultRoot()).appendingPathComponent(formatter.string(from:Date()) + "-" + UUID().uuidString)
         }
-        let session = StoredReviewSession(transcriptRecords:transcriptFeed.isEmpty ? nil : transcriptFeed,chatMessages:live.messages.isEmpty ? nil : live.messages,aiSummary:aiSummary.isEmpty ? nil : aiSummary,aiSummaryInput:aiSummaryInput.isEmpty ? nil : aiSummaryInput,target:target,shots:snapshots.map { StoredReviewShot(id:$0.id,frame:$0.frame,capturedAt:$0.capturedAt) },regions:regions,selectedID:selectedID)
-        let payload = ReviewSavePayload(session:session,originals:Dictionary(uniqueKeysWithValues:snapshots.map { ($0.id,$0.png) }),text:reviewPlainText(target:target?.label ?? "窗口批阅",regions:regions,snapshots:snapshots))
+        let session = StoredReviewSession(transcriptRecords:transcriptFeed.isEmpty ? nil : transcriptFeed,chatMessages:live.messages.isEmpty ? nil : live.messages,aiSummary:aiSummary.isEmpty ? nil : aiSummary,aiSummaryInput:aiSummaryInput.isEmpty ? nil : aiSummaryInput,target:target,shots:snapshots.map { StoredReviewShot(id:$0.id,frame:$0.frame,capturedAt:$0.capturedAt) },regions:regions,selectedID:selectedID,intentNote:intentNote.isEmpty ? nil : intentNote)
+        let payload = ReviewSavePayload(session:session,originals:Dictionary(uniqueKeysWithValues:snapshots.map { ($0.id,$0.png) }),text:reviewPlainText(target:reviewExportTitle(target?.label ?? "窗口批阅",note:intentNote),regions:regions,snapshots:snapshots))
         try await store.save(payload,folder:saveFolder!)
     }
     func restoreLatest() {
@@ -690,7 +712,7 @@ enum ReviewInputMode { case text, audio }
         live.messages = payload.session.chatMessages ?? []
         aiSummary = payload.session.aiSummary ?? ""; aiSummaryInput = payload.session.aiSummaryInput ?? ""
         transcriptFeed = payload.session.transcriptRecords ?? regions.map { ReviewTranscriptRecord(regionID:$0.id,text:$0.feedback) }
-        selectedID = payload.session.selectedID; saveFolder = folder
+        selectedID = payload.session.selectedID; saveFolder = folder; intentNote = payload.session.intentNote ?? ""
         let selectedShot = regions.first(where:{$0.id == selectedID})?.snapshotID
         current = restored.first(where:{$0.id == selectedShot}) ?? restored.last
         active = true; picking = false; paused = !restored.isEmpty; completed = false

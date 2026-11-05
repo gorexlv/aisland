@@ -683,6 +683,7 @@ struct ReviewSidebar:View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment:.leading,spacing:16) {
+                            if !model.intentNote.isEmpty { Text("意图：" + model.intentNote).font(.system(size:12)).foregroundStyle(IslandStyle.secondary).fixedSize(horizontal:false,vertical:true) }
                             if model.snapshots.isEmpty { emptyState }
                             ForEach(Array(model.snapshots.enumerated()),id:\.element.id) { index,shot in
                                 VStack(alignment:.leading,spacing:10) {
