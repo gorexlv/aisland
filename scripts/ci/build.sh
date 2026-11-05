@@ -12,6 +12,7 @@ app="$destination/Duck Island.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp outputs/DuckIsland/Info.plist "$app/Contents/Info.plist"
 cp outputs/DuckIsland/Assets/*.png "$app/Contents/Resources/"
+cp outputs/DuckIsland/AppStore/AppIcon.icns "$app/Contents/Resources/"
 python3 - "$app" "$tag" <<'PY'
 import json, pathlib, plistlib, subprocess, sys
 sys.path.insert(0, 'scripts/ci')

@@ -67,6 +67,7 @@ enum ReviewInputMode { case text, audio }
     }
     var summaryOutdated: Bool { !aiSummary.isEmpty && aiSummaryInput != summarySourceJSON }
     private func clearAISummary() {
+        cancelTextChat(); chatDraft = ""; pendingTextQuestion = nil
         summaryCancellation?.cancel(); summaryCancellation = nil; summaryGeneration = UUID()
         summaryBusy = false; aiSummary = ""; aiSummaryInput = ""; summaryError = nil
     }
@@ -160,6 +161,49 @@ enum ReviewInputMode { case text, audio }
             busy = false
             let context = "目标：\(target?.label ?? "未选择窗口")\n" + reviewPlainText(target:target?.label ?? "批阅",regions:regions,snapshots:snapshots)
             await live.start(context:context,deviceID:voice.selectedInputID)
+        }
+    }
+    var textChatResponder: @Sendable (String,SaveCancellation?) throws -> String = { try moAgentTextReply($0,cancellation:$1) }
+    @Published var chatDraft = ""
+    @Published var textChatBusy = false
+    @Published var textChatError: String?
+    private var textChatGeneration = UUID()
+    private var textChatCancellation: SaveCancellation?
+    private var pendingTextQuestion: UUID?
+    private func cancelTextChat() {
+        textChatCancellation?.cancel(); textChatCancellation = nil
+        textChatGeneration = UUID(); textChatBusy = false; textChatError = nil
+    }
+    func sendChatMessage(using reply:(@Sendable (String,SaveCancellation?) throws -> String)? = nil) {
+        let question = chatDraft.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard active, !busy, !textChatBusy, !question.isEmpty else { return }
+        let message = MoChatMessage(role:"user",text:question,startMS:0,endMS:0,source:"typed")
+        live.messages.append(message); pendingTextQuestion = message.id; chatDraft = ""
+        scheduleSave(); requestTextReply(to:message.id,using:reply ?? textChatResponder)
+    }
+    func retryChatMessage(using reply:(@Sendable (String,SaveCancellation?) throws -> String)? = nil) {
+        guard active, !busy, !textChatBusy, let id = pendingTextQuestion else { return }
+        requestTextReply(to:id,using:reply ?? textChatResponder)
+    }
+    private func requestTextReply(to id:UUID,using reply:@escaping @Sendable (String,SaveCancellation?) throws -> String) {
+        guard let question = live.messages.first(where:{$0.id == id}) else { return }
+        struct Input: Encodable { let question:String; let review:String; let messages:[MoChatMessage] }
+        let data = try? JSONEncoder().encode(Input(question:question.text,review:reviewPlainText(target:target?.label ?? "批阅",regions:regions,snapshots:snapshots),messages:Array(live.messages.suffix(20))))
+        guard let data, let input = String(data:data,encoding:.utf8) else { textChatError = "无法准备对话内容"; return }
+        let generation = textChatGeneration, cancellation = SaveCancellation()
+        textChatCancellation = cancellation; textChatBusy = true; textChatError = nil
+        Task {
+            do {
+                let answer = try await Task.detached(priority:.utility) { try reply(input,cancellation) }.value
+                guard generation == textChatGeneration, active else { return }
+                guard !answer.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { throw NotesFailure(detail:"Agent 返回了空回复，请重试") }
+                live.messages.append(MoChatMessage(role:"assistant",text:answer,startMS:0,endMS:0,source:"agent"))
+                textChatBusy = false; textChatCancellation = nil; pendingTextQuestion = nil
+                scheduleSave()
+            } catch {
+                guard generation == textChatGeneration, active else { return }
+                textChatBusy = false; textChatCancellation = nil; textChatError = error.localizedDescription
+            }
         }
     }
     @Published var liveNotice = ""
@@ -725,6 +769,7 @@ enum ReviewInputMode { case text, audio }
     func close() { Task { _ = await closeForTermination() } }
     func closeForTermination() async -> Bool {
         guard !busy else { return false }
+        cancelTextChat()
         summaryCancellation?.cancel(); summaryCancellation = nil; summaryGeneration = UUID(); summaryBusy = false
         busy = true
         autosave?.cancel()
