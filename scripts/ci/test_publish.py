@@ -20,6 +20,8 @@ class PublicationTests(unittest.TestCase):
             (root / 'release/SHA256SUMS').write_text(
                 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  fixture.zip\n')
             (root / 'release/fixture.zip').touch()
+            if case == 'bad-checksum':
+                (root / 'release/fixture.zip').write_text('corrupt')
             binary = root / 'bin'
             binary.mkdir()
             fake = '''#!/usr/bin/env python3
@@ -63,7 +65,7 @@ if tool == 'gh':
             self.assertIn('--draft=false', writes[1])
 
     def test_safety_gates_never_create(self):
-        for case in ('duplicate', 'moved', 'off-main', 'api-error'):
+        for case in ('duplicate', 'moved', 'off-main', 'api-error', 'bad-checksum'):
             result, calls = self.run_publish(case=case)
             self.assertNotEqual(result.returncode, 0, case)
             self.assertFalse(any(call[:2] == ['gh', 'release'] for call in calls), case)
