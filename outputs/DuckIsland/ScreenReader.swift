@@ -74,7 +74,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
                 guard session == token else { return }
                 targets = windows; status = windows.isEmpty ? "没有可选窗口，请打开应用后刷新" : "选择要框选的窗口"
                 if windows.count == 1 { select(windows[0]) }
-            } catch { guard session == token else { return }; permissionError = true; status = "请允许小鸭录制屏幕后刷新" }
+            } catch { guard session == token else { return }; permissionError = true; status = "请允许Mo · 墨录制屏幕后刷新" }
         }
     }
     func select(_ target:ScreenTarget) { selected = target; capture() }

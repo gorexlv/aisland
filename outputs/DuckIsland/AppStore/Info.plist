@@ -23,16 +23,16 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>会议结束时，小鸭会把转写文字保存到 Apple 备忘录中。</string>
+	<string>会议结束时，Mo · 墨会把转写文字保存到 Apple 备忘录中。</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>小鸭需要录制系统音频，将会议声音转换成文字。</string>
+	<string>Mo · 墨需要录制系统音频，将会议声音转换成文字。</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 chao lv</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>小鸭需要麦克风，将你说的话实时转换为文字。</string>
+	<string>Mo · 墨需要麦克风，将你说的话实时转换为文字。</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>小鸭需要获取选中窗口的画面，用于框选文字识别和截图批阅；会议模式仅采集音频。</string>
+	<string>Mo · 墨需要获取选中窗口的画面，用于框选文字识别和截图批阅；会议模式仅采集音频。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>小鸭使用 Apple 语音识别进行实时中文转写，优先本机识别，不支持时使用 Apple 在线服务。</string>
+	<string>Mo · 墨使用 Apple 语音识别进行实时中文转写，优先本机识别，不支持时使用 Apple 在线服务。</string>
 </dict>
 </plist>

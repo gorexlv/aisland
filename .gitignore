@@ -22,3 +22,4 @@ DerivedData/
 *.keychain-db
 *.mobileprovision
 *.provisionprofile
+.superpowers/
