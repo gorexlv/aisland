@@ -12,6 +12,7 @@ app="$destination/Duck Island.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp outputs/DuckIsland/Info.plist "$app/Contents/Info.plist"
 cp outputs/DuckIsland/Assets/*.png "$app/Contents/Resources/"
+cp outputs/DuckIsland/AppStore/AppIcon.icns "$app/Contents/Resources/"
 python3 - "$app" "$tag" <<'PY'
 import json, pathlib, plistlib, subprocess, sys
 sys.path.insert(0, 'scripts/ci')
@@ -34,7 +35,7 @@ PY
   cd outputs/DuckIsland
   xcrun swiftc -O main.swift RecentRecords.swift MeetingCapture.swift MeetingRecognition.swift \
     NotesExport.swift MeetingAnalysis.swift SpeechProbe.swift ScreenWindows.swift ScreenReader.swift \
-    VoiceInput.swift ReviewModel.swift ReviewPanels.swift ReviewExport.swift SelfTests.swift \
+    VoiceInput.swift MoLive.swift ReviewModel.swift ReviewPanels.swift ReviewOrbit.swift Launcher.swift ReviewExport.swift SelfTests.swift \
     -o "$app/Contents/MacOS/DuckIsland" -framework Cocoa -framework SwiftUI -framework Speech \
     -framework AVFoundation -framework ScreenCaptureKit -framework Vision -target arm64-apple-macosx15.0
 )

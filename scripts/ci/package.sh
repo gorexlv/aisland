@@ -34,4 +34,6 @@ assert plist['CFBundleShortVersionString'] == expected['version']
 assert plist['DuckIslandReleaseTag'] == expected['tag'] == info['tag']
 assert plist['DuckIslandCommit'] == info['commit']
 assert info['signing'] == 'ad-hoc' and info['notarized'] is False
+icon = plist.get('CFBundleIconFile')
+assert icon and (app / 'Contents/Resources' / icon).is_file(), 'Declared app icon is missing'
 PY

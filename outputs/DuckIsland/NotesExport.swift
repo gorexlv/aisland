@@ -13,7 +13,7 @@ func scriptLiteral(_ value: String) -> String {
         .replacingOccurrences(of: "\r", with: "\\r")
         .replacingOccurrences(of: "\n", with: "\\n") + "\""
 }
-func notesScript(title: String, text: String, existingID: String? = nil) -> String {
+func notesScript(title: String, text: String, existingID: String? = nil, attachmentPaths: [String] = []) -> String {
     let html = "<h1>" + htmlEscape(title) + "</h1><div>" + htmlEscape(text).replacingOccurrences(of: "\n", with: "<br>") + "</div>"
     let operation: String
     if let existingID {
@@ -21,10 +21,13 @@ func notesScript(title: String, text: String, existingID: String? = nil) -> Stri
     } else {
         operation = "set meetingNote to make new note at destination with properties {name:" + scriptLiteral(title) + ", body:" + scriptLiteral(html) + "}"
     }
+    let attachments = attachmentPaths.map { "make new attachment at meetingNote with data (POSIX file " + scriptLiteral($0) + ")" }.joined(separator:"\n")
+    let attachmentOperation = attachments.isEmpty ? "" : "try\n" + attachments + "\non error attachmentError number attachmentCode\n" + (existingID == nil ? "delete meetingNote\n" : "") + "error attachmentError number attachmentCode\nend try"
     return """
     tell application "Notes"
         set destination to default folder of default account
         \(operation)
+        \(attachmentOperation)
         return {id of meetingNote, name of meetingNote, name of container of meetingNote}
     end tell
     """
@@ -38,8 +41,8 @@ struct NoteReceipt: Codable {
     let name: String
     let folder: String
 }
-func insertIntoNotes(title: String, text: String, existingID: String? = nil) throws -> NoteReceipt {
-    guard let script = NSAppleScript(source: notesScript(title: title, text: text, existingID: existingID)) else {
+func insertIntoNotes(title: String, text: String, existingID: String? = nil, attachmentPaths: [String] = []) throws -> NoteReceipt {
+    guard let script = NSAppleScript(source: notesScript(title: title, text: text, existingID: existingID, attachmentPaths:attachmentPaths)) else {
         throw NotesFailure(detail: "无法创建备忘录脚本")
     }
     var error: NSDictionary?
@@ -65,6 +68,7 @@ struct NotesWorkerRequest: Codable {
     let title: String
     let text: String
     let existingID: String?
+    var attachmentPaths: [String]? = nil
 }
 struct NotesWorkerResponse: Codable {
     let receipt: NoteReceipt?
@@ -76,7 +80,7 @@ func runNotesWorker() {
     do {
         let input = FileHandle.standardInput.readDataToEndOfFile()
         let request = try JSONDecoder().decode(NotesWorkerRequest.self, from: input)
-        let receipt = try insertIntoNotes(title: request.title, text: request.text, existingID: request.existingID)
+        let receipt = try insertIntoNotes(title: request.title, text: request.text, existingID: request.existingID, attachmentPaths:request.attachmentPaths ?? [])
         FileHandle.standardOutput.write(try JSONEncoder().encode(NotesWorkerResponse(receipt: receipt, error: nil)))
     } catch {
         let response = NotesWorkerResponse(receipt: nil, error: error.localizedDescription)
@@ -171,13 +175,13 @@ final class MeetingBackupWriter: @unchecked Sendable {
     var recoveryText: String { unsaved.values.sorted().joined(separator: "\n\n────────\n\n") }
 }
 
-func insertIntoNotesInBackground(title: String, text: String, existingID: String?, cancellation: SaveCancellation? = nil) throws -> NoteReceipt {
+func insertIntoNotesInBackground(title: String, text: String, existingID: String?, cancellation: SaveCancellation? = nil, attachmentPaths: [String] = []) throws -> NoteReceipt {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     defer { try? FileManager.default.removeItem(at: directory) }
     let inputURL = directory.appendingPathComponent("input.json")
     let outputURL = directory.appendingPathComponent("output.json")
-    try JSONEncoder().encode(NotesWorkerRequest(title: title, text: text, existingID: existingID)).write(to: inputURL)
+    try JSONEncoder().encode(NotesWorkerRequest(title: title, text: text, existingID: existingID, attachmentPaths:attachmentPaths)).write(to: inputURL)
     FileManager.default.createFile(atPath: outputURL.path, contents: nil)
     let input = try FileHandle(forReadingFrom: inputURL), output = try FileHandle(forWritingTo: outputURL)
     defer { try? input.close(); try? output.close() }

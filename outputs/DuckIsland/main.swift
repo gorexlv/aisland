@@ -3,6 +3,7 @@ import SwiftUI
 import Speech
 import AVFoundation
 import Combine
+import Carbon
 
 func sentenceCount(_ text: String) -> Int {
     let parts = text.components(separatedBy: CharacterSet(charactersIn: "。！？.!?\n"))
@@ -107,13 +108,24 @@ func sentenceCount(_ text: String) -> Int {
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
         review.start()
     }
+    func showReviewTargets() {
+        guard !terminationRequested, !review.busy else { return }
+        screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
+        review.openTargetPicker()
+    }
+    func toggleReviewShortcut() {
+        guard !terminationRequested, !review.busy else { return }
+        if !review.active { startReview() }
+        else if review.picking { review.panels.showSidebar() }
+        else { review.toggleSinglePage() }
+    }
     func readScreen() {
         guard !terminationRequested else { return }
         showMenu = false; expanded = false; screenReader.open()
     }
     func meeting() {
         guard !terminationRequested else { return }
-        guard !review.voice.voiceActive else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
+        guard !review.voice.voiceActive, !review.live.active else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
         guard !recording else { showMenu = true; return }
@@ -457,7 +469,7 @@ private struct DuckMascot: View {
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion)) { context in
             let time = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate
             let breath = sin(time * 1.8)
-            Image(nsImage: MascotAssets.images["duck"]!)
+            Image(nsImage: MascotAssets.images["mo"]!)
                 .resizable().interpolation(.high).scaledToFit()
                 .frame(width:23,height:23)
                 .rotationEffect(.degrees(reduceMotion ? 0 : breath * 3 + (hovering ? -7 : 0)))
@@ -482,6 +494,51 @@ private struct DuckButtonStyle: ButtonStyle {
     }
 }
 
+struct IslandActivityIndicator: View {
+    @ObservedObject var live: MoLiveSession
+    init(model:Recorder,review:ReviewModel,voice:VoiceInput,reader:ScreenReader) {
+        self.model = model; self.review = review; self.voice = voice; self.reader = reader; self.live = review.live
+    }
+    @ObservedObject var model: Recorder
+    @ObservedObject var review: ReviewModel
+    @ObservedObject var voice: VoiceInput
+    @ObservedObject var reader: ScreenReader
+    var title: String {
+        if live.active { return live.closing ? "结束对话" : (live.ready ? "语音对话" : "连接对话") }
+        if voice.voicePreparing { return "启动录音" }
+        if voice.dictating || model.recording { return "正在录音" }
+        if voice.voiceFinishing { return "正在转写" }
+        if reader.busy { return "正在读屏" }
+        if reader.selecting { return "框选读屏" }
+        if review.active {
+            if voice.lastError != nil { return "录音异常" }
+            if review.busy { return "正在处理" }
+            if review.picking { return "选择窗口" }
+            if review.historyPresented { return "历史批阅" }
+            if review.paused { return review.inputMode == .text ? "文字批阅" : "正在批阅" }
+            return "批阅就绪"
+        }
+        if reader.visible { return "读屏就绪" }
+        if model.busy || model.processing { return "正在处理" }
+        return "就绪"
+    }
+    var body: some View {
+        HStack(spacing:5) {
+            if voice.dictating || model.recording || live.ready {
+                let level = live.ready ? live.inputLevel : (voice.dictating ? voice.inputLevel : model.level)
+                HStack(spacing:2) {
+                    ForEach(0..<3) { i in Capsule().fill(.red).frame(width:2,height:4+level*CGFloat([9,16,11][i])) }
+                }.frame(width:12,height:22)
+            } else {
+                Image(systemName:voice.lastError != nil && review.active ? "exclamationmark.circle" : (reader.busy || reader.selecting ? "viewfinder" : (voice.voiceFinishing ? "waveform" : "circle.fill")))
+                    .font(.system(size:voice.voicePreparing || voice.voiceFinishing || reader.busy ? 11 : 7))
+                    .foregroundStyle(voice.lastError != nil && review.active ? Color.orange : Color.green)
+            }
+            Text(title).font(.system(size:11,weight:.medium)).foregroundStyle(.white).lineLimit(1)
+        }.accessibilityElement(children:.ignore).accessibilityLabel(title)
+    }
+}
+
 struct IslandView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: Recorder
@@ -496,17 +553,15 @@ struct IslandView: View {
                     .help(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
                     .accessibilityLabel(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
                 Color.black.frame(width: model.notchWidth + 12, height: model.notchHeight)
-                Button { withAnimation(reduceMotion ? nil : .spring(response: 0.4)) { model.screenReader.hide(); model.showMenu = false; model.expanded.toggle() } } label: {
-                    HStack(spacing: 5) {
-                        HStack(alignment: .center, spacing: 3) {
-                            ForEach(0..<5) { index in
-                                Capsule().fill(model.recording ? yellow : Color.gray.opacity(0.65))
-                                    .frame(width: 3, height: model.recording ? 4 + model.level * CGFloat([12, 20, 10, 16, 8][index]) : CGFloat([7, 13, 19, 13, 7][index]))
-                            }
-                        }.frame(height: 26).animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: model.level)
-                        if model.recording { Image(systemName:"record.circle.fill").foregroundStyle(.red).font(.system(size:10)) }
-                    }.foregroundStyle(yellow).frame(width: 84)
-                }.buttonStyle(.plain).help("展开或收起会议文字").accessibilityLabel("展开或收起会议文字")
+                Button {
+                    if model.review.active { model.review.panels.showSidebar() }
+                    else if model.screenReader.visible { model.expanded = false; model.showMenu = false }
+                    else { withAnimation(reduceMotion ? nil : .spring(response:0.4)) { model.showMenu = false; model.expanded.toggle() } }
+                } label: {
+                    IslandActivityIndicator(model:model,review:model.review,voice:model.review.voice,reader:model.screenReader)
+                        .frame(width:84)
+                }.buttonStyle(.plain).help("当前工作状态")
+
             }.frame(height: model.notchHeight + 2)
             if model.recording && (model.showMenu || model.screenReader.visible || !model.expanded) {
                 HStack(spacing:12) {
@@ -527,30 +582,18 @@ struct IslandView: View {
                     .accessibilityLabel(model.toast)
             }
             if model.showMenu {
-                HStack(alignment: .top, spacing: 0) {
-                    Button(action: model.meeting) {
-                        VStack(spacing:0) {
-                            HangingMascot(name: "monkey", phase: 0)
-                            Text("会议记录").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
-                        }
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
-                        .help("会议 · 录制系统声音和麦克风").accessibilityLabel("猴子 · 会议")
-                    Button(action: model.readScreen) {
-                        VStack(spacing:0) {
-                            HangingMascot(name: "koala", phase: 1.8)
-                            Text("提取文字").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
-                        }
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
-                        .help("读屏 · 框选识别并保存文字").accessibilityLabel("树袋熊 · 读屏")
-                    Button(action: model.startReview) {
-                        VStack(spacing:0) {
-                            HangingMascot(name: "parrot", phase: 3.6)
-                            Text("截图批阅").font(.system(size:12,weight:.medium)).foregroundStyle(.white).padding(5).background(.black,in:Capsule())
-                        }
-                    }.buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
-                        .help("批阅 · 截图框选和语音评审").accessibilityLabel("鹦鹉 · 批阅")
-                    Spacer(minLength: 0)
-                }.padding(.leading, 6).padding(.top, -4).padding(.bottom, 12)
+                HStack(alignment:.top,spacing:6) {
+                    Button(action:model.meeting) { MoFeatureIcon(title:"会议",symbol:"waveform") }
+                        .buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
+                        .help("会议 · 录制系统声音和麦克风").accessibilityLabel("会议")
+                    Button(action:model.readScreen) { MoFeatureIcon(title:"读屏",symbol:"viewfinder") }
+                        .buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
+                        .help("读屏 · 框选识别并保存文字").accessibilityLabel("读屏")
+                    Button(action:model.startReview) { MoFeatureIcon(title:"批阅",symbol:"square.and.pencil") }
+                        .buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
+                        .help("批阅 · 截图框选和语音评审").accessibilityLabel("批阅")
+                    Spacer(minLength:0)
+                }.padding(.leading,6).padding(.top,8).padding(.bottom,12)
                     .transition(.opacity)
             } else if model.screenReader.visible {
                 ScreenReaderView(reader: model.screenReader)
@@ -576,7 +619,7 @@ struct IslandView: View {
             if model.recording { Button("结束会议") { Task { await model.stopMeeting() } }.disabled(model.busy) }
             Button("复制原文") { model.copy() }.disabled(model.transcript.isEmpty)
             Divider()
-            Button("退出小鸭") { NSApp.terminate(nil) }
+            Button("退出 Mo · 墨") { NSApp.terminate(nil) }
         }
     }
 }
@@ -682,13 +725,28 @@ func compactTranscript(_ text:String) -> String {
     }.joined(separator:"\n\n")
 }
 
+struct MoFeatureIcon: View {
+    let title: String
+    let symbol: String
+    var body: some View {
+        VStack(spacing:5) {
+            Image(systemName:symbol).font(.system(size:14,weight:.medium))
+                .foregroundStyle(.black).frame(width:32,height:32)
+                .background(.white,in:Circle())
+                .shadow(color:.black.opacity(0.18),radius:3,y:1)
+            Text(title).font(.system(size:11,weight:.medium)).foregroundStyle(.white)
+                .padding(.horizontal,7).padding(.vertical,3).background(.black,in:Capsule())
+        }.frame(width:56).contentShape(Rectangle())
+    }
+}
+
 struct MascotButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.scaleEffect(configuration.isPressed ? 0.96 : 1, anchor: .top)
     }
 }
 enum MascotAssets {
-    static let images: [String: NSImage] = Dictionary(uniqueKeysWithValues: ["monkey", "koala", "parrot", "duck"].map { name in
+    static let images: [String: NSImage] = Dictionary(uniqueKeysWithValues: ["monkey", "koala", "parrot", "mo", "jay"].map { name in
         let url = Bundle.main.resourceURL!.appendingPathComponent(name + ".png")
         return (name, NSImage(contentsOf: url)!)
     })
@@ -718,12 +776,66 @@ final class IslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
+// Carbon global hot keys do not require Accessibility or Input Monitoring permission.
+@MainActor final class ReviewHotKey {
+    nonisolated static let signature: OSType = 0x44555256
+    private var hotKeys: [EventHotKeyRef] = []
+    private var handler: EventHandlerRef?
+    private var actions: [UInt32: () -> Void] = [:]
+    private var held: Set<UInt32> = []
+    @discardableResult
+    func start(toggleKey:UInt32 = UInt32(kVK_Return), detachKey:UInt32 = UInt32(kVK_ANSI_E),
+               modifiers:UInt32 = UInt32(optionKey), pickerKey:UInt32 = UInt32(kVK_Return),
+               pickerModifiers:UInt32 = UInt32(optionKey | shiftKey),
+               action:@escaping ()->Void, detach:@escaping ()->Void, picker:@escaping ()->Void = {}) -> Bool {
+        stop()
+        for (id,key,chordModifiers) in [(UInt32(1),toggleKey,modifiers),(UInt32(2),detachKey,modifiers),(UInt32(3),pickerKey,pickerModifiers)] {
+            var ref: EventHotKeyRef?
+            let status = RegisterEventHotKey(key,chordModifiers,EventHotKeyID(signature:Self.signature,id:id),GetApplicationEventTarget(),OptionBits(kEventHotKeyExclusive),&ref)
+            guard status == noErr, let ref else { stop(); return false }
+            hotKeys.append(ref)
+        }
+        var events = [EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyPressed)),
+                      EventTypeSpec(eventClass:OSType(kEventClassKeyboard),eventKind:UInt32(kEventHotKeyReleased))]
+        let status = InstallEventHandler(GetApplicationEventTarget(), { _,event,context in
+            guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            var id = EventHotKeyID()
+            guard GetEventParameter(event,EventParamName(kEventParamDirectObject),EventParamType(typeEventHotKeyID),nil,MemoryLayout<EventHotKeyID>.size,nil,&id) == noErr,
+                  id.signature == ReviewHotKey.signature else { return OSStatus(eventNotHandledErr) }
+            let owner = Unmanaged<ReviewHotKey>.fromOpaque(context).takeUnretainedValue()
+            return MainActor.assumeIsolated {
+                guard owner.actions[id.id] != nil else { return OSStatus(eventNotHandledErr) }
+                owner.receive(id:id.id,pressed:GetEventKind(event) == UInt32(kEventHotKeyPressed))
+                return noErr
+            }
+        },events.count,&events,Unmanaged.passUnretained(self).toOpaque(),&handler)
+        guard status == noErr else { stop(); return false }
+        actions = [1:action,2:detach,3:picker]
+        return true
+    }
+    private func receive(id:UInt32,pressed:Bool) {
+        if !pressed { held.remove(id); return }
+        guard held.insert(id).inserted else { return }
+        actions[id]?()
+    }
+    func stop() {
+        for key in hotKeys { UnregisterEventHotKey(key) }; hotKeys.removeAll()
+        if let handler { RemoveEventHandler(handler) }; handler = nil
+        actions.removeAll(); held.removeAll()
+    }
+    deinit {
+        for key in hotKeys { UnregisterEventHotKey(key) }
+        if let handler { RemoveEventHandler(handler) }
+    }
+}
+
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     let model: Recorder
     override init() { model = Recorder(); super.init() }
     init(model: Recorder) { self.model = model; super.init() }
     var panel: IslandPanel!
     var statusItem: NSStatusItem!
+    private let reviewHotKey = ReviewHotKey()
     var expansion: AnyCancellable?
     var screenLayout: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -746,10 +858,19 @@ final class IslandPanel: NSPanel {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(spaceChanged), name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         panel.orderFrontRegardless()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "🐤"
+        let statusIcon = MascotAssets.images["mo"]!.copy() as! NSImage
+        statusIcon.size = NSSize(width:20,height:20)
+        statusItem.button?.image = statusIcon
+        statusItem.button?.toolTip = "Mo · 墨"
         let menu = NSMenu()
+        let shortcutAvailable = reviewHotKey.start(action:{ [weak self] in self?.model.toggleReviewShortcut() },detach:{ [weak self] in self?.detachReview() },picker:{ [weak self] in self?.model.showReviewTargets() })
+        model.review.shortcutHint = shortcutAvailable ? "⌥ Enter" : nil
+        menu.addItem(withTitle:shortcutAvailable ? "选择批阅窗口　⌥⇧ Enter" : "选择批阅窗口（快捷键不可用）",action:#selector(showReviewTargets),keyEquivalent:"")
+        let reviewItem = menu.addItem(withTitle:shortcutAvailable ? "切换批阅　⌥ Enter" : "切换批阅（快捷键不可用）",action:#selector(toggleReview),keyEquivalent:"")
+        if !shortcutAvailable { reviewItem.toolTip = "快捷键注册失败，可能已被其他应用占用；仍可点击菜单或呼吸灯切换。" }
+        menu.addItem(withTitle:shortcutAvailable ? "结束目标窗口批阅　⌥ E" : "结束目标窗口批阅（快捷键不可用）",action:#selector(detachReview),keyEquivalent:"")
         menu.addItem(withTitle: "快捷框选取字", action: #selector(quickReadScreen), keyEquivalent: "")
-        menu.addItem(withTitle: "显示小鸭", action: #selector(show), keyEquivalent: "")
+        menu.addItem(withTitle: "显示 Mo · 墨", action: #selector(show), keyEquivalent: "")
         menu.addItem(withTitle: "回到屏幕顶部", action: #selector(reset), keyEquivalent: "")
         #if APP_STORE
         menu.addItem(withTitle:"隐私与使用说明",action:#selector(showPrivacy),keyEquivalent:"")
@@ -774,10 +895,17 @@ final class IslandPanel: NSPanel {
         let isExpanded = expanded ?? model.expanded
         let screenReader = model.screenReader.visible && !(menu ?? model.showMenu)
         let width = screenReader ? max(494, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(494, notch + 180) : notch + 180)
-        let height = model.notchHeight + ((menu ?? model.showMenu) ? 138 : (screenReader ? model.screenReader.panelHeight : (isExpanded ? 452 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording && ((menu ?? model.showMenu) || screenReader || !isExpanded) ? 44 : 0)
+        let height = model.notchHeight + ((menu ?? model.showMenu) ? 84 : (screenReader ? model.screenReader.panelHeight : (isExpanded ? 452 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording && ((menu ?? model.showMenu) || screenReader || !isExpanded) ? 44 : 0)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
         if model.review.active { model.review.panels.positionSidebar(.zero) }
     }
+    func applicationWillTerminate(_ notification: Notification) { reviewHotKey.stop() }
+    @objc private func showReviewTargets() { model.showReviewTargets() }
+    @objc private func detachReview() {
+        guard !model.terminationRequested, model.review.active, !model.review.busy else { return }
+        model.review.close()
+    }
+    @objc private func toggleReview() { model.toggleReviewShortcut() }
     @objc private func quickReadScreen() { model.quickReadScreen() }
     @objc func spaceChanged() { panel.orderFrontRegardless() }
     @objc func screenChanged() { position() }

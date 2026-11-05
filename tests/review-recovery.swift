@@ -1,8 +1,5 @@
 import Cocoa
 
-struct NotesFailure: LocalizedError { let detail: String; var errorDescription: String? { detail } }
-func htmlEscape(_ text: String) -> String { text }
-class IslandPanel: NSPanel {}
 
 @main struct ReviewRecoveryTests {
     @MainActor static func main() async throws {
@@ -88,6 +85,7 @@ class IslandPanel: NSPanel {}
         let reviewSize = screenCaptureSize(CGSize(width:1920,height:1080),scale:2,purpose:.review)
         assert(reviewSize.width * reviewSize.height <= 6_000_000 && reviewSize.width < ocr.width)
         let model = ReviewModel()
+        model.voice.unavailableReason = "Synthetic test; microphone disabled"
         let first = ReviewRegion(snapshotID:shotID,number:1,rect:.zero), second = ReviewRegion(snapshotID:shotID,number:2,rect:.zero,feedback:"second")
         model.regions = [first,second]; model.selectedID = first.id
         model.voice.dictating = true
