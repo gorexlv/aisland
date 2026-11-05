@@ -1,0 +1,27 @@
+test_failed_upload_never_publishes (test_publish.PublicationTests.test_failed_upload_never_publishes) ... ok
+test_invalid_tag_never_calls_git_or_github (test_publish.PublicationTests.test_invalid_tag_never_calls_git_or_github) ... ok
+test_safety_gates_never_create (test_publish.PublicationTests.test_safety_gates_never_create) ... ok
+test_stages_before_publish_and_marks_prerelease (test_publish.PublicationTests.test_stages_before_publish_and_marks_prerelease) ... ok
+test_prerelease_keeps_numeric_apple_version (test_version.VersionTests.test_prerelease_keeps_numeric_apple_version) ... ok
+test_rejects_malformed_or_unsafe_tags (test_version.VersionTests.test_rejects_malformed_or_unsafe_tags) ... ok
+test_stable_versions (test_version.VersionTests.test_stable_versions) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 4.362s
+
+OK
+PASS: recent records reload, corrupt/legacy/empty fixtures, copy scopes, disabled AI, independent save and stages
+PASS: recent records reload, corrupt/legacy/empty fixtures, copy scopes, disabled AI, independent save and stages
+PASS: process timeout, SIGTERM escalation, abnormal exit, cancellation, write ordering, quit retry
+PASS: independent save outcomes and cross-session recovery
+PASS: unsigned local build
+PASS: process timeout, SIGTERM escalation, abnormal exit, cancellation, write ordering, quit retry
+PASS: independent save outcomes and cross-session recovery
+PASS: unsigned store build
+PASS: unsigned NotesHelper build
+PASS bounded slow dual-source queue, visible overload, accepted tail drain
+PASS exact byte limit, rejected overflow, cancellation releases retained samples
+PASS bounded stop deadlines, partial preservation, timeout markers, no append after stop
+PASS error partials, stale-result/session suppression, coalesced publication, final flush
+PASS dual-source chronological preview/final merge, stale completed-chunk callback
+Meeting recognition deterministic checks passed; no real recognizer/capture/Notes/AI was invoked

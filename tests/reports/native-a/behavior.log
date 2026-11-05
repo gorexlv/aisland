@@ -1,0 +1,9 @@
+PASS: incremental original/marked files, annotation consistency, multi-shot restore, debounce autosave, corruption, save failure retention, OCR Retina budget, late voice switching and close
+PASS: recognition partial/deadline warning survives final disk/Notes fixture saves and honest disk-failure status
+PASS: actual delegate + Recorder + recognition + review: voice/disk failure refuses quit; retry saves final voice; quit timeout preserves accepted drain; duplicate/busy quit does not restart stop; later quit succeeds
+PASS: menu/start/stop idempotence, selection speech barrier, delete/undo, persistence/empty recovery, failed close retention
+PASS: workflow OCR retention/edit/save/failure, clipboard, source association, display budget, reading follow, microphone admission
+Screen OCR checks passed: Chinese/English, selected-only extraction, crop orientation, persistence, invalid/empty handling
+Review checks passed: selection bounds, multiple-display coordinates, crop orientation, RTFD image/comment roundtrip
+Background save checks passed: isolated snapshots, backup before export, analysis fallback, export failure
+Meeting checks passed: chronological transcript, safe Notes script, PCM audio levels
