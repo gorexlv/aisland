@@ -20,7 +20,7 @@ func recognizeScreenRegion(png: Data, region: CGRect) throws -> ScreenReadResult
     let text = (request.results ?? []).compactMap{$0.topCandidates(1).first?.string}.joined(separator:"\n").trimmingCharacters(in:.whitespacesAndNewlines)
     return ScreenReadResult(text:text,image:data)
 }
-func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRect, root:URL? = nil) throws -> URL {
+func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRect, root:URL? = nil, note:String = "") throws -> URL {
     guard !result.text.isEmpty else { throw NotesFailure(detail:"框选区域没有识别到文字，请重新框选") }
     let directory = try root ?? ( FileManager.default.url(for:.applicationSupportDirectory,in:.userDomainMask,appropriateFor:nil,create:true)).appendingPathComponent("DuckIsland/ScreenReads")
     try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
@@ -29,7 +29,8 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true,attributes:[.posixPermissions:0o700])
     do {
         try result.image.write(to:folder.appendingPathComponent("region.png"),options:.atomic)
-        let metadata = ["应用":source.app,"窗口":source.title,"框选范围":"\(region)"]
+        var metadata = ["应用":source.app,"窗口":source.title,"框选范围":"\(region)"]
+        if !note.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty { metadata["意图"] = note }
         try JSONEncoder().encode(metadata).write(to:folder.appendingPathComponent("source.json"),options:.atomic)
         let textFile = folder.appendingPathComponent("文字.txt")
         try result.text.write(to:textFile,atomically:true,encoding:.utf8)
@@ -60,9 +61,14 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     private var token = UUID()
     private var pending: (ScreenReadResult, ScreenTarget, CGRect)?
     var onNotice:((String)->Void)?
+    var note = ""
+    var onSaved:((URL,String)->Void)?
+    private(set) var lastSaveWasResave = false
+    private var savedOnce = false
     func open() { visible = true; refresh() }
     func cancel() { token = UUID(); busy = false; selecting = false; overlay?.close(); overlay = nil; regionPanels.forEach { $0.close() }; regionPanels = [] }
     func hide() { cancel(); visible = false }
+    func reset() { cancel(); pending = nil; savedText = nil; savedOnce = false; savedFile = nil; text = ""; preview = nil; selected = nil; note = "" }
     func refresh() {
         cancel(); selected = nil; targets = []; busy = true; permissionError = false
         let session = token
@@ -121,17 +127,19 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     func accept(_ result: ScreenReadResult, target: ScreenTarget, region: CGRect, choice: ReplacementChoice? = nil) {
         guard !result.text.isEmpty else { status = "没有识别到文字，原文字保留"; return }
         guard allowReplacement(choice) else { status = "已保留上次文字"; return }
-        savedFile = nil; savedText = nil
+        savedFile = nil; savedText = nil; savedOnce = false
         text = result.text; preview = NSImage(data:result.image); pending = (result,target,region)
         save()
     }
     func save() {
         guard let (result,target,region) = pending else { return }
         do {
-            savedFile = try saveScreenRead(ScreenReadResult(text:text,image:result.image),source:target,region:region,root:storageRoot)
+            savedFile = try saveScreenRead(ScreenReadResult(text:text,image:result.image),source:target,region:region,root:storageRoot,note:note)
             savedText = text
             status = "已保存：" + (savedFile?.deletingLastPathComponent().lastPathComponent ?? "")
             onNotice?("读屏文字已保存")
+            lastSaveWasResave = savedOnce; savedOnce = true
+            if let savedFile { onSaved?(savedFile,text) }
         } catch { status = "保存失败：\(error.localizedDescription)，文字仍保留，可重试保存" }
     }
     func preserveForTermination() -> Bool {

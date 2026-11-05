@@ -255,6 +255,7 @@ enum ReviewInputMode { case text, audio }
     private var tracking: Timer?
     private var trackingBusy = false
     var onNotice: ((String)->Void)?
+    var onRestoreRequest: (() -> Void)?
     init(storageRoot: URL? = nil,liveSummary:MoLiveSummary? = nil) {
         self.liveSummary = liveSummary ?? MoLiveSummary()
         self.storageRoot = storageRoot
