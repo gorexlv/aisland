@@ -4,6 +4,7 @@
 /work/
 /docs/
 .DS_Store
+__pycache__/
 *.xcuserstate
 xcuserdata/
 DerivedData/

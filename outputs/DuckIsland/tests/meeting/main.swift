@@ -122,8 +122,10 @@ do {
     wait { !recognition.pending }
     precondition(recognition.finalText().contains("新会话尾句") && recognition.finalText().contains("转写不完整"))
     precondition(!recognition.finalText().contains("旧会话") && !recognition.finalText().contains("过期回调"))
-    pump(0.06)
-    precondition(publications.count == 1 && publications[0].contains("新会话尾句"))
+    // A RunLoop time slice is not a DispatchQueue delivery barrier on headless runners.
+    // Wait for the callback; retain the exact-count/content assertions below.
+    wait { !publications.isEmpty }
+    precondition(publications.count == 1 && publications[0].contains("新会话尾句"), "Expected one current-session publication, got: \(publications)")
     recognition.cancel(); precondition(recognition.finalText().isEmpty)
     print("PASS error partials, stale-result/session suppression, coalesced publication, final flush")
 }

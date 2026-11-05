@@ -1,0 +1,81 @@
+name: macOS CI and Release
+
+on:
+  pull_request:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['**'] # Include slash-containing tags so malformed tags also fail validation.
+  workflow_dispatch: # Validation/build only, even when a tag is selected in the UI.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # Do not interrupt an in-progress publication.
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check toolchain and release tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          xcrun swift --version
+          xcrun --sdk macosx --show-sdk-version
+          if [[ "$REF_TYPE" == tag ]]; then
+            python3 scripts/ci/version.py "$REF_NAME"
+            echo "BUILD_TAG=$REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo 'BUILD_TAG=v0.0.0-dev' >> "$GITHUB_ENV"
+          fi
+      - name: Offline behavior tests and both source configurations
+        run: bash scripts/ci/test.sh
+      - name: Build App Store app and embedded helper without signing
+        run: >-
+          xcodebuild -project outputs/DuckIsland/DuckIsland.xcodeproj
+          -scheme DuckIsland -configuration Release
+          -derivedDataPath "$RUNNER_TEMP/store" CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO build
+      - name: Build direct distribution app without certificate signing
+        run: bash scripts/ci/build.sh "$RUNNER_TEMP/direct" "$BUILD_TAG"
+      - name: Ad-hoc sign, package and verify extracted app
+        run: bash scripts/ci/package.sh "$RUNNER_TEMP/direct" "$BUILD_TAG"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-arm64
+          path: |
+            ${{ runner.temp }}/direct/*.zip
+            ${{ runner.temp }}/direct/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: macos-arm64
+          path: release
+      - name: Publish existing validated tag (must belong to main)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash scripts/ci/publish.sh
