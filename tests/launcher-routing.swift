@@ -68,6 +68,22 @@ Task { @MainActor in
     precondition(reviewCalls.isEmpty && ocrCalls.count == 2 && reframes == 0)
     recorder.terminationRequested = false
 
+    // concurrent launch ignored; busy end shows wait toast
+    (recorder, review, ocr) = makeRecorder("d"); wire()
+    var slowCalls = 0
+    recorder.attachOCR = { _,_ in slowCalls += 1; try? await Task.sleep(nanoseconds:200_000_000); return true }
+    let first = Task { await recorder.launch(t,.ocr,note:"1") }
+    while slowCalls == 0 { await Task.yield() }
+    precondition(recorder.launching)
+    await recorder.launch(t2,.ocr,note:"2")
+    await first.value
+    precondition(slowCalls == 1 && !recorder.launching)
+    review.active = true; review.busy = true
+    await recorder.endCurrentWorkAction()
+    precondition(recorder.toast == "正在处理，请稍后结束" && review.busy && review.active, recorder.toast)
+    review.active = false; review.busy = false
+    (recorder, review, ocr) = makeRecorder("c"); wire()
+
     // 4. primaryAction
     ocr.active = true; ocr.target = fixture
     recorder.primaryAction(); precondition(reframes == 1)

@@ -21,6 +21,7 @@ func sentenceCount(_ text: String) -> Int {
     var reframeOCR: () -> Void = {}
     private var screenChanges: AnyCancellable?
     var terminationRequested = false
+    private(set) var launching = false
     @Published var recording = false
     @Published var recordingStartedAt: Date?
     @Published var audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
@@ -138,6 +139,7 @@ func sentenceCount(_ text: String) -> Int {
         guard !terminationRequested else { return }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         showMenu = false
+        launcher.reset()
         launcherPanel.show()
         Task { await launcher.open(frontPID:pid) }
     }
@@ -148,10 +150,12 @@ func sentenceCount(_ text: String) -> Int {
     }
     func endCurrentWorkAction() async {
         guard !terminationRequested else { return }
+        if (review.active && review.busy) || (windowOCR.active && windowOCR.reader.busy) { notify("正在处理，请稍后结束"); return }
         if !(await endCurrentWork()) { notify("当前工作保存失败，未结束") }
     }
     func launch(_ target: ScreenTarget, _ capability: DuckCapability, note: String) async {
-        guard !terminationRequested else { return }
+        guard !terminationRequested, !launching else { return }
+        launching = true; defer { launching = false }
         guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
         guard !terminationRequested else { return }
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false

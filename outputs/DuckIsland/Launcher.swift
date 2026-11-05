@@ -50,13 +50,17 @@ enum LauncherStep { case window, capability, ready }
     var capabilityRows: [DuckCapability] { target.map { launcherFilteredCapabilities(duckCapabilities(for: $0), query: query) } ?? [] }
     private var rowCount: Int { step == .window ? windowRows.count : step == .capability ? capabilityRows.count : 0 }
     private var generation = 0
+    @Published var permissionError = false
+    func reset() {
+        generation += 1
+        step = .window; query = ""; targets = []; frontID = nil; target = nil; capability = nil; highlight = 0; status = ""; permissionError = false; visible = true
+    }
     func open(frontPID: pid_t?) async {
-        generation += 1; let current = generation
-        step = .window; query = ""; targets = []; frontID = nil; target = nil; capability = nil; highlight = 0; status = ""; visible = true
+        reset(); let current = generation
         let loaded: [ScreenTarget]
         do { loaded = try await loadTargets() } catch {
             guard current == generation, visible else { return }
-            status = "请允许Mo · 墨录制屏幕后重试"; return
+            status = "请允许Mo · 墨录制屏幕后重试"; permissionError = true; return
         }
         guard current == generation, visible else { return }
         targets = loaded
@@ -95,6 +99,8 @@ enum LauncherStep { case window, capability, ready }
 }
 
 
+func launcherDeleteAllowed(isRepeat: Bool, responder: NSResponder?) -> Bool { !isRepeat && (responder as? NSTextView)?.hasMarkedText() != true }
+
 struct LauncherView: View {
     @ObservedObject var model: LauncherModel
     @FocusState private var focused: Bool
@@ -115,7 +121,13 @@ struct LauncherView: View {
     private func rowBackground(_ index: Int) -> some View { RoundedRectangle(cornerRadius:8).fill(index == model.highlight ? Color.white.opacity(0.1) : .clear) }
     @ViewBuilder private var rows: some View {
         if !model.status.isEmpty {
-            Text(model.status).font(.system(size:13)).foregroundStyle(IslandStyle.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(14)
+            VStack(alignment:.leading,spacing:8) {
+                Text(model.status).font(.system(size:13)).foregroundStyle(IslandStyle.secondary)
+                if model.permissionError {
+                    Button("打开系统设置") { NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }
+                        .buttonStyle(.plain).font(.system(size:12,weight:.medium)).foregroundStyle(Color.blue)
+                }
+            }.frame(maxWidth:.infinity,alignment:.leading).padding(14)
         } else if model.step == .window {
             if model.windowRows.isEmpty { Text("没有匹配的窗口").font(.system(size:13)).foregroundStyle(IslandStyle.secondary).padding(14) }
             else { list(model.windowRows) { index, item in windowRow(index, item) } }
@@ -171,7 +183,7 @@ struct LauncherView: View {
                     .onKeyPress(.downArrow) { model.move(1); return .handled }
                     .onKeyPress(.return) { model.confirm(); return .handled }
                     .onKeyPress(.escape) { model.close(); return .handled }
-                    .onKeyPress(.delete) { model.deleteBackward() ? .handled : .ignored }
+                    .onKeyPress(keys:[.delete],phases:[.down,.repeat]) { press in launcherDeleteAllowed(isRepeat:press.phase == .repeat,responder:NSApp.keyWindow?.firstResponder) && model.deleteBackward() ? .handled : .ignored }
             }.padding(.horizontal,14).frame(height:48)
             if model.step != .ready || !model.status.isEmpty {
                 Divider().overlay(IslandStyle.line)
@@ -204,7 +216,7 @@ struct LauncherView: View {
         p.animationBehavior = .none; p.isReleasedWhenClosed = false
         p.keyInterceptor = { [weak self] event in
             guard event.keyCode == 51, event.modifierFlags.intersection([.command,.option,.control,.shift]).isEmpty else { return false }
-            return MainActor.assumeIsolated { self?.model.deleteBackward() == true }
+            return MainActor.assumeIsolated { launcherDeleteAllowed(isRepeat:event.isARepeat,responder:self?.panel?.firstResponder) && self?.model.deleteBackward() == true }
         }
         p.contentView = host; panel = p
         place(p,initial:true)

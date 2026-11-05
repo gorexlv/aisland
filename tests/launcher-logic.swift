@@ -59,10 +59,10 @@ Task { @MainActor in
     // Errors
     struct Denied: Error {}
     (m, launches, closes) = await makeModel { throw Denied() }
-    precondition(m.status.contains("录制屏幕"))
+    precondition(m.status.contains("录制屏幕") && m.permissionError)
     m.confirm(); precondition(launches().isEmpty)
     (m, launches, closes) = await makeModel { [] }
-    precondition(m.status == "没有可选窗口，请打开应用后重试")
+    precondition(m.status == "没有可选窗口，请打开应用后重试" && !m.permissionError)
     m.confirm(); precondition(launches().isEmpty && m.step == .window)
     // Stale load must not overwrite a newer open or a closed launcher
     let stale = LauncherModel()
@@ -85,6 +85,13 @@ Task { @MainActor in
     let t4 = Task { await stale.open(frontPID:nil) }
     await t4.value; stale.close()
     precondition(stale.visible == false)
+    precondition(launcherDeleteAllowed(isRepeat:false,responder:nil) && !launcherDeleteAllowed(isRepeat:true,responder:nil))
+    let tv = NSTextView(); precondition(launcherDeleteAllowed(isRepeat:false,responder:tv))
+    tv.setMarkedText("ni",selectedRange:NSRange(location:2,length:0),replacementRange:NSRange(location:0,length:0))
+    precondition(!launcherDeleteAllowed(isRepeat:false,responder:tv), "marked text must block tag deletion")
+    // reset is synchronous and clears stale state
+    m.target = a; m.step = .capability; m.permissionError = true; m.reset()
+    precondition(m.step == .window && m.target == nil && !m.permissionError && m.targets.isEmpty)
     print("PASS: launcher logic")
     exit(0)
 }
