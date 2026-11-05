@@ -447,16 +447,29 @@ struct MoConversationPanel: View {
     @ObservedObject var model: ReviewModel
     @ObservedObject var voice: VoiceInput
     @ObservedObject var live: MoLiveSession
+    @ObservedObject var liveSummary: MoLiveSummary
     @State private var settings = false
     @State private var summary = false
+    @State private var showingSummary = false
+    init(model:ReviewModel,voice:VoiceInput,live:MoLiveSession) {
+        self.model = model; self.voice = voice; self.live = live; self.liveSummary = model.liveSummary
+    }
     private var rows: [MoConversationRow] { moConversationRows(model) }
     var body: some View {
         VStack(spacing:0) {
             HStack(spacing:10) {
-                Text("默默").font(.system(size:13,weight:.semibold))
-                Text(model.speakingEnabled ? "发言" : "静默").font(.system(size:10)).foregroundStyle(.secondary)
+                Button { showingSummary = false } label: {
+                    Text("Chat").font(.system(size:12,weight:showingSummary ? .regular : .semibold)).foregroundStyle(showingSummary ? Color.secondary : Color.primary)
+                }.buttonStyle(.plain).accessibilityLabel("Chat Tab")
+                if liveSummary.enabled {
+                    Button { showingSummary = true } label: {
+                        Text("Summary").font(.system(size:12,weight:showingSummary ? .semibold : .regular)).foregroundStyle(showingSummary ? Color.accentColor : Color.secondary)
+                    }.buttonStyle(.plain).accessibilityLabel("Summary Tab")
+                }
                 Spacer(minLength:2)
                 #if !APP_STORE
+                Toggle("Live",isOn:Binding(get:{liveSummary.enabled},set:{model.setLiveSummary($0)}))
+                    .toggleStyle(.switch).controlSize(.mini).font(.system(size:10)).fixedSize().help("实时整理对话中的决定与待办")
                 Button { summary = true; if model.aiSummary.isEmpty { model.summarizeReview() } } label: { Image(systemName:"sparkles") }
                     .buttonStyle(.plain).help("AI 整理 · 保留框选编号")
                     .popover(isPresented:$summary) { ReviewAISummaryView(model:model) }
@@ -469,6 +482,9 @@ struct MoConversationPanel: View {
                     .popover(isPresented:$settings) { MoLiveSettingsView(live:live) }
             }.padding(10)
             Divider()
+            if showingSummary && liveSummary.enabled {
+                MoSummaryPanel(summary:liveSummary)
+            } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment:.leading,spacing:8) {
@@ -522,7 +538,9 @@ struct MoConversationPanel: View {
                     if voice.voiceActive || live.active { model.stopListening() } else { model.resumeListening() }
                 }.font(.system(size:10)).buttonStyle(.plain).disabled(model.busy)
             }.padding(.horizontal,10).padding(.top,4).padding(.bottom,8)
-        }.background(Color(nsColor:.windowBackgroundColor),in:RoundedRectangle(cornerRadius:10))
+            }
+        }.onChange(of:liveSummary.enabled) { if !liveSummary.enabled { showingSummary = false } }
+            .background(Color(nsColor:.windowBackgroundColor),in:RoundedRectangle(cornerRadius:10))
             .overlay(RoundedRectangle(cornerRadius:10).stroke(.gray.opacity(0.3),lineWidth:1).allowsHitTesting(false))
             .clipShape(RoundedRectangle(cornerRadius:10)).onAppear { voice.refreshInputDevices() }
     }
@@ -617,6 +635,145 @@ struct MoChatComposer: NSViewRepresentable {
             guard commandSelector == #selector(NSResponder.insertNewline(_:)), !textView.hasMarkedText() else { return false }
             if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
             parent.submit(); return true
+        }
+    }
+}
+
+/// Independent from chat/voice requests; only one extraction process may run at a time.
+@MainActor final class MoLiveSummary: ObservableObject {
+    typealias Analyzer = @Sendable ([MoSummarySource],SaveCancellation?) throws -> MoSummaryContent
+    @Published private(set) var enabled = false
+    @Published private(set) var memory: MoSummaryMemory?
+    @Published private(set) var updating = false
+    @Published private(set) var error: String?
+    @Published private var sources: [MoSummarySource] = []
+    private var generation = UUID()
+    private var scheduled: Task<Void,Never>?
+    private var cancellation: SaveCancellation?
+    private var working = false
+    private var firstChange: Date?
+    private var retryAfter: Date?
+    private let debounce: TimeInterval
+    private let maxWait: TimeInterval
+    private let analyze: Analyzer
+    var onChange: (() -> Void)?
+    var outdated: Bool { memory.map { $0.sources != sources } ?? !sources.isEmpty }
+    init(debounce:TimeInterval = 2,maxWait:TimeInterval = 8,analyze:@escaping Analyzer = { try analyzeMoSummary($0,cancellation:$1) }) {
+        self.debounce = debounce; self.maxWait = maxWait; self.analyze = analyze
+    }
+    func update(sources:[MoSummarySource]) {
+        guard self.sources != sources else { return }
+        self.sources = sources
+        if enabled { schedule() }
+    }
+    func setEnabled(_ value:Bool,notify:Bool = true) {
+        guard enabled != value else { return }
+        enabled = value; generation = UUID(); scheduled?.cancel(); scheduled = nil
+        cancellation?.cancel(); firstChange = nil; retryAfter = nil; error = nil
+        if !working { updating = false }
+        if enabled { schedule() }
+        if notify { onChange?() }
+    }
+    func reset() {
+        setEnabled(false,notify:false); generation = UUID(); memory = nil; sources = []; error = nil
+    }
+    func restore(memory:MoSummaryMemory?) { reset(); self.memory = memory }
+    func refresh() {
+        guard enabled else { return }
+        retryAfter = nil; error = nil
+        schedule(force:true)
+    }
+    private func schedule(force:Bool = false) {
+        guard enabled else { return }
+        if sources.isEmpty {
+            generation = UUID(); scheduled?.cancel(); scheduled = nil; cancellation?.cancel()
+            firstChange = nil; retryAfter = nil; error = nil
+            let hadMemory = memory != nil
+            memory = nil
+            if !working { updating = false }
+            if hadMemory { onChange?() }
+            return
+        }
+        guard force || outdated else { scheduled?.cancel(); scheduled = nil; firstChange = nil; return }
+        if firstChange == nil { firstChange = Date() }
+        guard !working else { return }
+        scheduled?.cancel()
+        let remaining = max(0,maxWait - Date().timeIntervalSince(firstChange!))
+        let backoff = max(0,retryAfter?.timeIntervalSinceNow ?? 0)
+        let delay = max(backoff,force ? 0 : min(debounce,remaining))
+        scheduled = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds:UInt64(delay * 1_000_000_000)); try Task.checkCancellation() }
+            catch { return }
+            self?.start()
+        }
+    }
+    private func start() {
+        scheduled = nil
+        guard enabled, !working, !sources.isEmpty else { return }
+        let input = sources, epoch = generation, cancel = SaveCancellation(), analyze = self.analyze
+        working = true; updating = true; error = nil; firstChange = nil; cancellation = cancel
+        Task { [weak self] in
+            let result = await Task.detached(priority:.utility) { () -> Result<MoSummaryContent,Error> in
+                Result { let content = try analyze(input,cancel); try content.validate(sources:input); return content }
+            }.value
+            guard let self else { return }
+            self.working = false; self.updating = false; self.cancellation = nil
+            guard self.enabled, self.generation == epoch else {
+                if self.enabled { self.schedule() }
+                return
+            }
+            switch result {
+            case .success(let content):
+                self.memory = MoSummaryMemory(content:content,sources:input,updatedAt:Date())
+                self.retryAfter = nil; self.onChange?()
+            case .failure(let failure):
+                self.error = failure.localizedDescription; self.retryAfter = Date().addingTimeInterval(30)
+            }
+            // A failed request is retried by new input or an explicit refresh, never a tight loop.
+            if self.sources != input { self.schedule() }
+        }
+    }
+}
+
+struct MoSummaryPanel: View {
+    @ObservedObject var summary: MoLiveSummary
+    var body: some View {
+        ScrollView {
+            VStack(alignment:.leading,spacing:12) {
+                HStack(spacing:6) {
+                    if summary.updating { ProgressView().controlSize(.mini) }
+                    Text(summary.updating ? "正在整理…" : summary.outdated ? "等待更新" : "已更新").font(.system(size:10)).foregroundStyle(.secondary)
+                    if let memory = summary.memory { Text(memory.updatedAt,style:.time).font(.system(size:9)).foregroundStyle(.secondary) }
+                    Spacer()
+                    Button { summary.refresh() } label: { Image(systemName:"arrow.clockwise") }.buttonStyle(.plain).disabled(summary.updating).help("更新摘要")
+                }
+                if let error = summary.error { Text(error).font(.system(size:10)).foregroundStyle(.orange).textSelection(.enabled) }
+                if let memory = summary.memory {
+                    section("概要",icon:"text.alignleft",items:memory.content.overview,memory:memory)
+                    section("Decision",icon:"checkmark.seal",items:memory.content.decisions,memory:memory)
+                    section("Todo",icon:"checklist",items:memory.content.todos,memory:memory)
+                    section("待解决",icon:"questionmark.bubble",items:memory.content.questions,memory:memory)
+                } else { Text("对话中的关键点、决定与待办会整理在这里。").font(.system(size:12)).foregroundStyle(.secondary) }
+            }.padding(10).frame(maxWidth:.infinity,alignment:.leading)
+        }
+    }
+    private func section(_ title:String,icon:String,items:[MoSummaryItem],memory:MoSummaryMemory) -> some View {
+        VStack(alignment:.leading,spacing:6) {
+            Label(title,systemImage:icon).font(.system(size:11,weight:.semibold)).foregroundStyle(.secondary)
+            if items.isEmpty { Text("暂无").font(.system(size:11)).foregroundStyle(.tertiary) }
+            ForEach(Array(items.enumerated()),id:\.offset) { _,item in
+                VStack(alignment:.leading,spacing:4) {
+                    Text(item.text).font(.system(size:12)).textSelection(.enabled)
+                    HStack(spacing:5) {
+                        if item.status == "proposed" { Text("待确认") }
+                        if item.status == "done" || item.status == "resolved" { Text("已完成") }
+                        ForEach(item.sourceIDs,id:\.self) { id in
+                            Text(memory.sources.first(where:{$0.id == id})?.regionNumber.map { "#\($0)" } ?? "对话")
+                                .help(memory.sources.first(where:{$0.id == id})?.text ?? "")
+                        }
+                    }.font(.system(size:9)).foregroundStyle(Color.accentColor)
+                }.padding(8).frame(maxWidth:.infinity,alignment:.leading).background(Color.primary.opacity(0.04),in:RoundedRectangle(cornerRadius:7))
+            }
         }
     }
 }

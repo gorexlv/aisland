@@ -51,6 +51,25 @@ enum ReviewInputMode { case text, audio }
     @Published var target: ScreenTarget?
     @Published var regions: [ReviewRegion] = []
     @Published var intentNote = ""
+    let liveSummary: MoLiveSummary
+    var liveSummarySources: [MoSummarySource] {
+        let notes = regions.compactMap { region -> MoSummarySource? in
+            let text = region.feedback.trimmingCharacters(in:.whitespacesAndNewlines)
+            return text.isEmpty ? nil : MoSummarySource(id:"region:"+region.id.uuidString,role:"user",regionNumber:region.number,text:text)
+        }
+        let chat = live.messages.compactMap { message -> MoSummarySource? in
+            guard message.regionID == nil || (message.role == "assistant" && regions.contains(where:{$0.id == message.regionID})) else { return nil }
+            let text = message.text.trimmingCharacters(in:.whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return MoSummarySource(id:"chat:"+message.id.uuidString,role:message.role,regionNumber:regions.first(where:{$0.id == message.regionID})?.number,text:text)
+        }
+        return notes + chat
+    }
+    func setLiveSummary(_ enabled:Bool) {
+        guard active else { return }
+        liveSummary.update(sources:liveSummarySources)
+        liveSummary.setEnabled(enabled)
+    }
     @Published var aiSummary = ""
     @Published var aiSummaryInput = ""
     @Published var summaryBusy = false
@@ -67,6 +86,7 @@ enum ReviewInputMode { case text, audio }
     }
     var summaryOutdated: Bool { !aiSummary.isEmpty && aiSummaryInput != summarySourceJSON }
     private func clearAISummary() {
+        liveSummary.reset()
         cancelTextChat(); chatDraft = ""; pendingTextQuestion = nil
         summaryCancellation?.cancel(); summaryCancellation = nil; summaryGeneration = UUID()
         summaryBusy = false; aiSummary = ""; aiSummaryInput = ""; summaryError = nil
@@ -235,9 +255,11 @@ enum ReviewInputMode { case text, audio }
     private var tracking: Timer?
     private var trackingBusy = false
     var onNotice: ((String)->Void)?
-    init(storageRoot: URL? = nil) {
+    init(storageRoot: URL? = nil,liveSummary:MoLiveSummary? = nil) {
+        self.liveSummary = liveSummary ?? MoLiveSummary()
         self.storageRoot = storageRoot
         panels = ReviewPanels(model:self)
+        self.liveSummary.onChange = { [weak self] in self?.scheduleSave() }
         live.onMessagesChanged = { [weak self] in self?.scheduleSave() }
         live.currentRegionID = { [weak self] in self?.selectedID }
         live.onSessionStarted = { [weak self] in
@@ -658,6 +680,7 @@ enum ReviewInputMode { case text, audio }
     func stopVoice() { voice.finishVoice(cancel:true) }
     private func finishDictation() async { await voice.finishAndWait() }
     private func scheduleSave() {
+        if active { liveSummary.update(sources:liveSummarySources) }
         autosave?.cancel()
         guard active, !snapshots.isEmpty else { return }
         let session = token
@@ -712,6 +735,7 @@ enum ReviewInputMode { case text, audio }
             guard let folder = saveFolder else { throw NotesFailure(detail:"批阅尚未保存") }
             let packet = try await store.prepareClaudePacket(folder:folder)
             try await open(packet.link)
+            liveSummary.setEnabled(false)
             token = UUID(); tracking?.invalidate(); tracking = nil
             panels.close(); active = false; picking = false; paused = false; target = nil
             status = "已在 Claude Desktop 准备截图与评论，请在 Claude 中点击发送"
@@ -721,12 +745,13 @@ enum ReviewInputMode { case text, audio }
         }
     }
     func persist() async throws {
+        if active { liveSummary.update(sources:liveSummarySources) }
         guard !snapshots.isEmpty || saveFolder != nil else { return }
         if saveFolder == nil {
             let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             saveFolder = try (storageRoot ?? ReviewStore.defaultRoot()).appendingPathComponent(formatter.string(from:Date()) + "-" + UUID().uuidString)
         }
-        let session = StoredReviewSession(transcriptRecords:transcriptFeed.isEmpty ? nil : transcriptFeed,chatMessages:live.messages.isEmpty ? nil : live.messages,aiSummary:aiSummary.isEmpty ? nil : aiSummary,aiSummaryInput:aiSummaryInput.isEmpty ? nil : aiSummaryInput,target:target,shots:snapshots.map { StoredReviewShot(id:$0.id,frame:$0.frame,capturedAt:$0.capturedAt) },regions:regions,selectedID:selectedID,intentNote:intentNote.isEmpty ? nil : intentNote)
+        let session = StoredReviewSession(liveSummaryMemory:liveSummary.memory,transcriptRecords:transcriptFeed.isEmpty ? nil : transcriptFeed,chatMessages:live.messages.isEmpty ? nil : live.messages,aiSummary:aiSummary.isEmpty ? nil : aiSummary,aiSummaryInput:aiSummaryInput.isEmpty ? nil : aiSummaryInput,target:target,shots:snapshots.map { StoredReviewShot(id:$0.id,frame:$0.frame,capturedAt:$0.capturedAt) },regions:regions,selectedID:selectedID,intentNote:intentNote.isEmpty ? nil : intentNote)
         let payload = ReviewSavePayload(session:session,originals:Dictionary(uniqueKeysWithValues:snapshots.map { ($0.id,$0.png) }),text:reviewPlainText(target:reviewExportTitle(target?.label ?? "窗口批阅",note:intentNote),regions:regions,snapshots:snapshots))
         try await store.save(payload,folder:saveFolder!)
     }
@@ -760,6 +785,8 @@ enum ReviewInputMode { case text, audio }
         let selectedShot = regions.first(where:{$0.id == selectedID})?.snapshotID
         current = restored.first(where:{$0.id == selectedShot}) ?? restored.last
         active = true; picking = false; paused = !restored.isEmpty; completed = false
+        liveSummary.restore(memory:payload.session.liveSummaryMemory)
+        liveSummary.update(sources:liveSummarySources)
         if presentPanels { panels.clearHighlights() }
         voice.loadDraft(regions.first(where:{$0.id == selectedID})?.feedback ?? "",transcript:regions.first(where:{$0.id == selectedID})?.transcript ?? [])
         if presentPanels, let current { panels.showOverlay(current); panels.positionSidebar(current.frame) }
@@ -769,6 +796,7 @@ enum ReviewInputMode { case text, audio }
     func close() { Task { _ = await closeForTermination() } }
     func closeForTermination() async -> Bool {
         guard !busy else { return false }
+        liveSummary.setEnabled(false)
         cancelTextChat()
         summaryCancellation?.cancel(); summaryCancellation = nil; summaryGeneration = UUID(); summaryBusy = false
         busy = true
