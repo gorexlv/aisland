@@ -112,10 +112,12 @@ Task { @MainActor in
     let beforeBitmap = liveView.bitmapImageRepForCachingDisplay(in:liveView.bounds)!
     liveView.cacheDisplay(in:liveView.bounds,to:beforeBitmap)
     try beforeBitmap.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:CommandLine.arguments[1]).appendingPathComponent("live-before-click.png"))
-    let livePoint = CGPoint(x:30,y:liveView.isFlipped ? 61 : liveView.bounds.height-61)
+    // The compact tab header moves the first opinion title upward. Queue the
+    // complete click so selectable text cannot trap a synchronous mouse-down.
+    let livePoint = CGPoint(x:30,y:liveView.isFlipped ? 46 : liveView.bounds.height-46)
     for type in [NSEvent.EventType.leftMouseDown,.leftMouseUp] {
         let input = NSEvent.mouseEvent(with:type,location:liveView.convert(livePoint,to:nil),modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:liveWindow.windowNumber,context:nil,eventNumber:9,clickCount:1,pressure:0)!
-        liveWindow.sendEvent(input)
+        NSApp.postEvent(input,atStart:false)
     }
     try await Task.sleep(nanoseconds:50_000_000)
     while model.busy { try await Task.sleep(nanoseconds:1_000_000) }
