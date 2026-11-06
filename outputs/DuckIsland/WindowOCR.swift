@@ -5,9 +5,13 @@ import SwiftUI
 
 struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: String; let date: Date }
 
-@MainActor final class WindowOCRPanels {
-    weak var session: WindowOCRSession?
-    var reframeAction: (() -> Void)?
+/// Shared orb + record panel mechanics for attached-window capabilities (OCR, Lark proxy).
+@MainActor class OrbitPanels {
+    var isActive: () -> Bool = { false }
+    var makeOrbit: (ReviewOrbitLayout) -> AnyView = { _ in AnyView(EmptyView()) }
+    var makeRecord: () -> AnyView = { AnyView(EmptyView()) }
+    var toolbarTitle = "呼吸灯"
+    var recordTitle = "记录"
     private(set) var toolbar: NSPanel?
     private(set) var record: NSPanel?
     private var targetFrame: CGRect?
@@ -36,20 +40,20 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
         relative = CGPoint(x:(next.anchor.x-targetFrame.minX)/max(1,targetFrame.width),y:(next.anchor.y-targetFrame.minY)/max(1,targetFrame.height))
         refresh()
     }
-    private func orbitView(_ session: WindowOCRSession, _ layout: ReviewOrbitLayout) -> AnyView {
-        AnyView(WindowOCROrbitView(session:session,voice:session.voice,reframeAction:reframeAction).scaleEffect(layout.scale,anchor:.topLeading).frame(width:layout.controls.width,height:layout.controls.height,alignment:.topLeading))
+    private func orbitView(_ layout: ReviewOrbitLayout) -> AnyView {
+        AnyView(makeOrbit(layout).scaleEffect(layout.scale,anchor:.topLeading).frame(width:layout.controls.width,height:layout.controls.height,alignment:.topLeading))
     }
     private func refresh() {
-        guard let session, session.active, let layout else { toolbar?.orderOut(nil); record?.orderOut(nil); return }
+        guard isActive(), let layout else { toolbar?.orderOut(nil); record?.orderOut(nil); return }
         if toolbar == nil {
-            let p = panel(layout.controls,level:4); p.title = "读屏呼吸灯"
-            p.contentView = ReviewControlsHostingView(rootView:orbitView(session,layout)); toolbar = p; toolbarScale = layout.scale
+            let p = panel(layout.controls,level:4); p.title = toolbarTitle
+            p.contentView = ReviewControlsHostingView(rootView:orbitView(layout)); toolbar = p; toolbarScale = layout.scale
         } else if toolbarScale != layout.scale, let host = toolbar?.contentView as? NSHostingView<AnyView> {
-            host.rootView = orbitView(session,layout); toolbarScale = layout.scale
+            host.rootView = orbitView(layout); toolbarScale = layout.scale
         }
         if record == nil {
-            let p = panel(layout.preview,level:3); p.hasShadow = true; p.title = "读屏记录"
-            p.contentView = ReviewControlsHostingView(rootView:WindowOCRRecordView(session:session)); record = p
+            let p = panel(layout.preview,level:3); p.hasShadow = true; p.title = recordTitle
+            p.contentView = ReviewControlsHostingView(rootView:makeRecord()); record = p
         }
         toolbar?.setFrame(layout.controls,display:true); record?.setFrame(layout.preview,display:true)
         if workspaceVisible { record?.orderFrontRegardless(); toolbar?.orderFrontRegardless() }
@@ -58,6 +62,24 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
     func close() {
         toolbar?.close(); toolbar = nil; toolbarScale = nil; record?.close(); record = nil
         targetFrame = nil; relative = CGPoint(x:0.88,y:0.78); workspaceVisible = true
+    }
+}
+
+@MainActor final class WindowOCRPanels: OrbitPanels {
+    weak var session: WindowOCRSession? { didSet { configure() } }
+    var reframeAction: (() -> Void)?
+    override init() { super.init(); configure() }
+    private func configure() {
+        toolbarTitle = "读屏呼吸灯"; recordTitle = "读屏记录"
+        isActive = { [weak self] in self?.session?.active == true }
+        makeOrbit = { [weak self] _ in
+            guard let session = self?.session else { return AnyView(EmptyView()) }
+            return AnyView(WindowOCROrbitView(session:session,voice:session.voice,reframeAction:self?.reframeAction))
+        }
+        makeRecord = { [weak self] in
+            guard let session = self?.session else { return AnyView(EmptyView()) }
+            return AnyView(WindowOCRRecordView(session:session))
+        }
     }
 }
 
@@ -112,7 +134,7 @@ struct WindowOCROrbitView: View {
                     .background(session.speakingEnabled ? Color(red:0.08,green:0.45,blue:0.94) : Color(red:0.30,green:0.35,blue:0.39),in:Circle())
                     .overlay(Circle().stroke(.white.opacity(0.9),lineWidth:1.5))
             }.disabled(!session.speakingEnabled && !hasText)
-                .help(!session.speakingEnabled && !hasText ? "请先框选识别文字" : (session.speakingEnabled ? "发言：可就识别文字与默默对话；点击切为静默" : "静默；点击开启发言"))
+                .help(!session.speakingEnabled && !hasText ? "请先框选识别文字" : (session.speakingEnabled ? "发言：可就识别文字与小墨对话；点击切为静默" : "静默；点击开启发言"))
                 .accessibilityLabel(session.speakingEnabled ? "发言模式，切换静默" : "静默模式，切换发言")
                 .position(x:91,y:105)
         }.frame(width:128,height:124).buttonStyle(.plain)
@@ -174,7 +196,7 @@ struct WindowOCRRecordView: View {
                 ScrollView {
                     VStack(alignment:.leading,spacing:4) {
                         ForEach(live.messages.suffix(6)) { message in
-                            Text((message.role == "assistant" ? "默默：" : "你：") + message.text).font(.system(size:11)).foregroundStyle(message.role == "assistant" ? Color.white : IslandStyle.secondary).frame(maxWidth:.infinity,alignment:.leading)
+                            Text((message.role == "assistant" ? "小墨：" : "你：") + message.text).font(.system(size:11)).foregroundStyle(message.role == "assistant" ? Color.white : IslandStyle.secondary).frame(maxWidth:.infinity,alignment:.leading)
                         }
                     }
                 }.frame(maxHeight:60)

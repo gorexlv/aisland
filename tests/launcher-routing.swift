@@ -84,6 +84,47 @@ Task { @MainActor in
     review.active = false; review.busy = false
     (recorder, review, ocr) = makeRecorder("c"); wire()
 
+    // 3b. Lark proxy routing: launch(.larkProxy) ends previous work and attaches via the injectable closure; other launches end the proxy
+    do {
+        let larkTarget = ScreenTarget(id:5,pid:-1,app:"Lark",bundleID:"com.larksuite.larkApp",title:"Lark")
+        let larkReview = ReviewModel(storageRoot:base.appendingPathComponent("lark-review"))
+        let larkOCR = WindowOCRSession(voice:larkReview.voice,storageRoot:base.appendingPathComponent("lark-ocr"))
+        let proxy = LarkProxySession(); proxy.autoStart = false
+        let lr = Recorder(review:larkReview,windowOCR:larkOCR,larkProxy:proxy)
+        var larkCalls: [(ScreenTarget,String)] = [], larkOCRCalls = 0, larkReviewCalls = 0
+        lr.attachLarkProxy = { larkCalls.append(($0,$1)); return true }
+        lr.attachOCR = { _,_ in larkOCRCalls += 1; return true }
+        lr.attachReview = { _,_ in larkReviewCalls += 1; return true }
+        larkOCR.active = true; larkOCR.target = fixture
+        await lr.launch(larkTarget,.larkProxy,note:"帮我回")
+        precondition(!larkOCR.active && larkCalls.count == 1 && larkCalls[0].0 == larkTarget && larkCalls[0].1 == "帮我回" && larkOCRCalls == 0 && larkReviewCalls == 0)
+        // proxy active -> launching OCR/review ends it first
+        proxy.active = true; proxy.target = larkTarget
+        await lr.launch(t,.ocr,note:"")
+        precondition(!proxy.active && larkOCRCalls == 1 && larkCalls.count == 1)
+        proxy.active = true
+        await lr.launch(t,.review,note:"")
+        precondition(!proxy.active && larkReviewCalls == 1)
+        // proxy active -> launching the proxy again ends the old one first
+        proxy.active = true
+        await lr.launch(larkTarget,.larkProxy,note:"")
+        precondition(!proxy.active && larkCalls.count == 2)
+        // review busy blocks the switch
+        larkReview.active = true; larkReview.busy = true
+        await lr.launch(larkTarget,.larkProxy,note:"")
+        precondition(larkCalls.count == 2 && lr.toast == "正在处理，请稍后再试")
+        larkReview.active = false; larkReview.busy = false
+        // attach failure surfaces the proxy status as a toast
+        proxy.status = "未找到 lark-cli，请在设置中填写路径"
+        lr.attachLarkProxy = { _,_ in false }
+        await lr.launch(larkTarget,.larkProxy,note:"")
+        precondition(lr.toast == "未找到 lark-cli，请在设置中填写路径", lr.toast)
+        // end action ends the proxy; termination path ends it too
+        proxy.active = true
+        await lr.endCurrentWorkAction()
+        precondition(!proxy.active)
+    }
+
     // 4. primaryAction
     ocr.active = true; ocr.target = fixture
     recorder.primaryAction(); precondition(reframes == 1)

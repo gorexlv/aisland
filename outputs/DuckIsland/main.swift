@@ -14,10 +14,12 @@ func sentenceCount(_ text: String) -> Int {
     let screenReader: ScreenReader
     let review: ReviewModel
     let windowOCR: WindowOCRSession
+    let larkProxy: LarkProxySession
     let launcher = LauncherModel()
     lazy var launcherPanel = LauncherPanel(model:launcher)
     var attachReview: (ScreenTarget, String) async -> Bool = { _, _ in false }
     var attachOCR: (ScreenTarget, String) async -> Bool = { _, _ in false }
+    var attachLarkProxy: (ScreenTarget, String) async -> Bool = { _, _ in false }
     var reframeOCR: () -> Void = {}
     private var screenChanges: AnyCancellable?
     private var activityChanges: AnyCancellable?
@@ -75,18 +77,21 @@ func sentenceCount(_ text: String) -> Int {
     private(set) var warning = ""
     var count: Int { sentenceCount(transcript) }
 
-    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil, windowOCR: WindowOCRSession? = nil) {
+    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil, windowOCR: WindowOCRSession? = nil, larkProxy: LarkProxySession? = nil) {
         self.screenReader = screenReader ?? ScreenReader()
         self.recognition = recognition
         let reviewModel = review ?? ReviewModel()
         self.review = reviewModel
         self.windowOCR = windowOCR ?? WindowOCRSession(voice:reviewModel.voice)
+        self.larkProxy = larkProxy ?? LarkProxySession()
         self.screenReader.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onRestoreRequest = { [weak self] in Task { @MainActor in await self?.restoreLatestReview() } }
         let ocr = self.windowOCR
         attachReview = { [reviewModel] target, note in await reviewModel.attach(target,note:note) }
         attachOCR = { target, note in await ocr.attach(target,note:note) }
+        let lark = self.larkProxy
+        attachLarkProxy = { target, note in await lark.attach(target,note:note) }
         reframeOCR = { ocr.reframe() }
         launcher.onLaunch = { [weak self] target, capability, note in Task { @MainActor in await self?.launch(target,capability,note:note) } }
         launcher.onClose = { [weak self] in self?.launcherPanel.hide() }
@@ -188,6 +193,7 @@ func sentenceCount(_ text: String) -> Int {
     func endCurrentWork() async -> Bool {
         if review.active, !(await review.closeForTermination()) { return false }
         if windowOCR.active, !(await windowOCR.end()) { return false }
+        if larkProxy.active, !(await larkProxy.end()) { return false }
         return true
     }
     func endCurrentWorkAction() async {
@@ -202,12 +208,18 @@ func sentenceCount(_ text: String) -> Int {
         guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
         guard !terminationRequested else { return }
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
-        let ok = capability == .review ? await attachReview(target,note) : await attachOCR(target,note)
-        if !ok { let text = capability == .review ? review.status : windowOCR.status; if !text.isEmpty { notify(text) } }
+        let ok: Bool, failure: String
+        switch capability {
+        case .review: ok = await attachReview(target,note); failure = review.status
+        case .ocr: ok = await attachOCR(target,note); failure = windowOCR.status
+        case .larkProxy: ok = await attachLarkProxy(target,note); failure = larkProxy.status
+        }
+        if !ok, !failure.isEmpty { notify(failure) }
     }
     func primaryAction() {
         guard !terminationRequested else { return }
         if windowOCR.active { if !windowOCR.reader.busy { reframeOCR() } }
+        else if larkProxy.active { larkProxy.pollNow() }
         else if review.active { toggleReviewShortcut() }
         else { openLauncher() }
     }
@@ -721,7 +733,6 @@ struct IslandView: View {
 
 struct MeetingPane: View {
     @ObservedObject var model: Recorder
-    @State private var settings = false
     @State private var recovery = false
     var body: some View {
         VStack(spacing:0) {
@@ -730,10 +741,7 @@ struct MeetingPane: View {
                 Spacer(minLength:8)
                 ToolButton(title:"最近记录与任务",symbol:"clock.arrow.circlepath",action:model.showRecentRecords)
                 ToolButton(title:"会议结果",symbol:"doc.text",action:model.showMeetingResult).disabled(model.transcript.isEmpty)
-                ToolButton(title:"会议设置",symbol:"gearshape") { settings.toggle() }
-                    .popover(isPresented:$settings) {
-                        MeetingSettings(model:model)
-                    }
+                ToolButton(title:"会议设置",symbol:"gearshape") { SettingsWindow.shared.show(section:.meeting) }
                 ToolButton(title:"收起会议面板",symbol:"chevron.up") { model.expanded = false }
             }.padding(14)
             Divider().overlay(IslandStyle.line)
@@ -764,20 +772,6 @@ struct MeetingPane: View {
                 ToolButton(title:model.copied ? "已复制原文" : "复制原文",symbol:model.copied ? "checkmark" : "doc.on.doc",action:{model.copy()}).disabled(model.transcript.isEmpty)
             }.font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(.horizontal,14).padding(.vertical,8)
         }.modifier(IslandSurface())
-    }
-}
-struct MeetingSettings: View {
-    @ObservedObject var model:Recorder
-    var body: some View {
-        VStack(alignment:.leading,spacing:16) {
-            Text("会议设置").font(.headline)
-            #if !APP_STORE
-            Toggle("结束后生成 AI 总结",isOn:Binding(get:{model.automaticSummary},set:{model.setAutomaticSummary($0)}))
-            Text("开启时会确认授权；关闭后不发送会议文字。").font(.system(size:12)).foregroundStyle(.secondary)
-            #else
-            Text("会议文字保存在本机，可同步到备忘录。").font(.system(size:13))
-            #endif
-        }.padding(18).frame(width:300).modifier(IslandSurface())
     }
 }
 struct MeetingTimer: View {
@@ -941,6 +935,7 @@ final class IslandPanel: NSPanel {
     var screenLayout: AnyCancellable?
     var activityLayout: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SettingsWindow.shared.model = model
         panel = IslandPanel(contentRect: NSRect(x: 0, y: 0, width: 490, height: 330), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false; panel.backgroundColor = .clear
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 3); panel.hasShadow = false
@@ -981,6 +976,7 @@ final class IslandPanel: NSPanel {
         #if APP_STORE
         menu.addItem(withTitle:"隐私与使用说明",action:#selector(showPrivacy),keyEquivalent:"")
         #endif
+        menu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: "")
         menu.addItem(withTitle: "最近记录与任务", action: #selector(recentRecords), keyEquivalent: "")
         menu.addItem(withTitle: "恢复未保存会议", action: #selector(recoverMeetings), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
@@ -1027,6 +1023,7 @@ final class IslandPanel: NSPanel {
         } catch { model.notify("无法打开记录目录：" + error.localizedDescription) }
     }
     #endif
+    @objc func openSettings() { SettingsWindow.shared.show() }
     @objc func recentRecords() { model.showRecentRecords() }
     @objc func recoverMeetings() { model.recoverUnsavedMeetings() }
     @objc func quit() { NSApp.terminate(nil) }
@@ -1046,6 +1043,7 @@ final class IslandPanel: NSPanel {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return
             }
+            if model.larkProxy.active { _ = await model.larkProxy.end() }
             if model.windowOCR.active, !(await model.windowOCR.end()) {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return

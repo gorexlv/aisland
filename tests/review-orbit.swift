@@ -97,6 +97,17 @@ Task { @MainActor in
     precondition(text.contains("--image") && text.contains("read-only") && text.contains("comments.txt"))
     #endif
     model.panels.close()
+    let tall = CGRect(x:0,y:0,width:900,height:800), rel = CGPoint(x:0.88,y:0.78)
+    let base = reviewOrbitLayout(target:tall,relative:rel)
+    let grown = reviewOrbitLayout(target:tall,relative:rel,previewHeight:420)
+    precondition(grown.preview.height == 420 && grown.preview.maxY == base.preview.maxY, "Chat height grows downward from a fixed top")
+    precondition(reviewOrbitLayout(target:tall,relative:rel,previewHeight:20).preview.height == 100, "Chat height has a minimum")
+    let capped = reviewOrbitLayout(target:tall,relative:rel,previewHeight:5000)
+    precondition(capped.preview.minY >= tall.minY && capped.preview.height < 5000, "Chat height stays inside the target window")
+    let panels = ReviewPanels(model:ReviewModel())
+    UserDefaults.standard.removeObject(forKey:"reviewChatHeight")
+    panels.setChatHeight(300); precondition(UserDefaults.standard.double(forKey:"reviewChatHeight") == 300)
+    panels.setChatHeight(nil); precondition(UserDefaults.standard.object(forKey:"reviewChatHeight") == nil)
     print("PASS: orb-only selected UI, bounded drag, edge-aligned aspect preview, glow, voice locks and ownership, completion persistence/restoration, Notes attachment syntax and Codex command syntax")
     exit(0)
 }
