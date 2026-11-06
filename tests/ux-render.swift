@@ -86,7 +86,7 @@ try MainActor.assumeIsolated {
     review.busy = false; review.selectedID = nil; review.snapshots = []; review.regions = []
     review.recoveryFolder = root; review.paused = false; review.current = nil; review.status = "尚未截取"
     try renderFixture(ReviewSidebar(model:review,voice:review.voice),"review-empty-recovery",NSSize(width:494,height:580))
-    try renderFixture(MeetingSettings(model:model),"meeting-settings",NSSize(width:340,height:170))
+    try renderFixture(MeetingSettingsForm(model:model),"meeting-settings",NSSize(width:340,height:170))
     let records = RecordWindows()
     records.records = [RecentRecord(url:root,date:Date(timeIntervalSince1970:1000),kind:"会议",title:"虚构长标题：产品讨论与后续计划",text:"虚构会议内容",issue:nil)]
     try renderFixture(RecentRecordsView(model:records),"recent-records",NSSize(width:760,height:580))
