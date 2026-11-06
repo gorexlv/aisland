@@ -566,10 +566,27 @@ struct MoConversationPanel: View {
                 }.font(.system(size:10)).buttonStyle(.plain).disabled(model.busy)
             }.padding(.horizontal,10).padding(.top,4).padding(.bottom,8)
             }
+            MoChatResizeGrip(panels:model.panels)
         }.onChange(of:liveSummary.enabled) { if !liveSummary.enabled { model.conversationTab = .chat } }
             .background(Color(nsColor:.windowBackgroundColor),in:RoundedRectangle(cornerRadius:10))
             .overlay(RoundedRectangle(cornerRadius:10).stroke(.gray.opacity(0.3),lineWidth:1).allowsHitTesting(false))
             .clipShape(RoundedRectangle(cornerRadius:10)).onAppear { voice.refreshInputDevices() }
+    }
+}
+struct MoChatResizeGrip: View {
+    let panels: ReviewPanels
+    @State private var origin: (height:CGFloat, mouseY:CGFloat)?
+    var body: some View {
+        Capsule().fill(.secondary.opacity(0.5)).frame(width:36,height:4)
+            .frame(maxWidth:.infinity).frame(height:10).contentShape(Rectangle())
+            .onHover { $0 ? NSCursor.resizeUpDown.push() : NSCursor.pop() }
+            .gesture(DragGesture(minimumDistance:1).onChanged { _ in
+                let mouseY = NSEvent.mouseLocation.y
+                if origin == nil { origin = (panels.chatPanelHeight,mouseY) }
+                if let origin { panels.setChatHeight(origin.height+origin.mouseY-mouseY) }
+            }.onEnded { _ in origin = nil })
+            .onTapGesture(count:2) { panels.setChatHeight(nil) }
+            .help("拖动调整高度 · 双击恢复默认").accessibilityLabel("调整对话框高度")
     }
 }
 struct MoLiveSettingsView: View {

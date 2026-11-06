@@ -29,7 +29,14 @@ import SwiftUI
     private var layout: ReviewOrbitLayout? {
         guard let targetFrame else { return nil }
         let aspect: CGFloat = 1.5
-        return reviewOrbitLayout(target:targetFrame,relative:relative,aspect:aspect)
+        return reviewOrbitLayout(target:targetFrame,relative:relative,aspect:aspect,previewHeight:chatHeight)
+    }
+    private(set) var chatHeight: CGFloat? = UserDefaults.standard.object(forKey:"reviewChatHeight") as? CGFloat
+    var chatPanelHeight: CGFloat { layout?.preview.height ?? 0 }
+    func setChatHeight(_ height:CGFloat?) {
+        chatHeight = height.map { max(100,$0) }
+        if let chatHeight { UserDefaults.standard.set(Double(chatHeight),forKey:"reviewChatHeight") } else { UserDefaults.standard.removeObject(forKey:"reviewChatHeight") }
+        refreshChrome()
     }
     init(model:ReviewModel) { self.model = model }
     private func panel(_ frame:CGRect,level:Int) -> NSPanel {

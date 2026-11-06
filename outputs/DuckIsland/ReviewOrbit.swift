@@ -8,16 +8,17 @@ struct ReviewOrbitLayout {
     let preview: CGRect
     let scale: CGFloat
 }
-func reviewOrbitLayout(target: CGRect, relative: CGPoint, aspect: CGFloat = 1.5) -> ReviewOrbitLayout {
+func reviewOrbitLayout(target: CGRect, relative: CGPoint, aspect: CGFloat = 1.5, previewHeight: CGFloat? = nil) -> ReviewOrbitLayout {
     let scale = max(0.1,min(1,target.width/128,target.height/300))
     let minX = target.minX+64*scale, maxX = target.maxX-64*scale
     let minY = target.minY+min(168*scale,max(40*scale,target.height-84*scale))
     let maxY = target.maxY-84*scale
     let anchor = CGPoint(x:min(max(target.minX+relative.x*target.width,minX),maxX),y:min(max(target.minY+relative.y*target.height,minY),maxY))
     let safeAspect = aspect.isFinite && aspect > 0 ? aspect : 1.5
-    let maxHeight = max(1,min(240,anchor.y-target.minY-54*scale))
-    let width = max(1,min(350,target.width-24*scale,maxHeight*safeAspect))
-    let height = width/safeAspect
+    let available = max(1,anchor.y-target.minY-54*scale)
+    let maxHeight = min(240,available)
+    let width = max(1,min(350,target.width-24*scale,previewHeight == nil ? maxHeight*safeAspect : .infinity))
+    let height = previewHeight.map { min(max($0,100),available) } ?? width/safeAspect
     let x = anchor.x < target.midX ? target.minX+12*scale : target.maxX-12*scale-width
     return ReviewOrbitLayout(anchor:anchor,controls:CGRect(x:anchor.x-64*scale,y:anchor.y-40*scale,width:128*scale,height:124*scale),preview:CGRect(x:x,y:anchor.y-42*scale-height,width:width,height:height),scale:scale)
 }
