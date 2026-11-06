@@ -18,6 +18,7 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
     private var toolbarScale: CGFloat?
     private var relative = CGPoint(x:0.88,y:0.78)
     private var workspaceVisible = true
+    private var recordVisible = true
     var desktopTop: CGFloat { NSScreen.screens.first?.frame.maxY ?? 0 }
     var orbAnchor: CGPoint { layout?.anchor ?? .zero }
     private var layout: ReviewOrbitLayout? { targetFrame.map { reviewOrbitLayout(target:$0,relative:relative) } }
@@ -56,12 +57,14 @@ struct WindowOCRRecord: Identifiable { let id: UUID; let file: URL; var text: St
             p.contentView = ReviewControlsHostingView(rootView:makeRecord()); record = p
         }
         toolbar?.setFrame(layout.controls,display:true); record?.setFrame(layout.preview,display:true)
-        if workspaceVisible { record?.orderFrontRegardless(); toolbar?.orderFrontRegardless() }
+        if workspaceVisible { if recordVisible { record?.orderFrontRegardless() } else { record?.orderOut(nil) }; toolbar?.orderFrontRegardless() }
     }
+    /// Lets a capability collapse the record panel while keeping the orb (default: shown).
+    func setRecordVisible(_ visible: Bool) { recordVisible = visible; refresh() }
     func hideForWorkspace() { workspaceVisible = false; toolbar?.orderOut(nil); record?.orderOut(nil) }
     func close() {
         toolbar?.close(); toolbar = nil; toolbarScale = nil; record?.close(); record = nil
-        targetFrame = nil; relative = CGPoint(x:0.88,y:0.78); workspaceVisible = true
+        targetFrame = nil; relative = CGPoint(x:0.88,y:0.78); workspaceVisible = true; recordVisible = true
     }
 }
 
