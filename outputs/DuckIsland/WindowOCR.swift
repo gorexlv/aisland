@@ -90,7 +90,7 @@ struct WindowOCROrbitView: View {
                 .popover(isPresented:$recordsShown) { WindowOCRRecordList(session:session,reframe:reframe) }
                 .position(x:37,y:105).zIndex(1)
             Button { reframe() } label: {
-                MoOrb(ringColor:ringColor,busy:reader.busy,listening:voice.dictating || live.ready)
+                MoOrb(ringColor:ringColor,busy:reader.busy,activity:{ session.activityState })
             }.disabled(reader.busy)
                 .accessibilityLabel("重新框选识别区域").help("点击重新框选；拖动移动呼吸灯")
                 .highPriorityGesture(DragGesture(minimumDistance:6).updating($isDragging) { _,state,_ in state = true }.onChanged { value in
@@ -298,4 +298,27 @@ struct WindowOCRRecordView: View {
         return true
     }
     func preserveForTermination() -> Bool { reader.preserveForTermination() }
+}
+
+// Use the same descriptors for the OCR orb and the island after integrating the launcher.
+extension WindowOCRSession {
+    var activityState:MoActivityState {
+        var items:[MoActivity] = []
+        if active {
+            if reader.busy { items.append(MoActivity(id:"ocr-reading",kind:.reading,title:"正在读屏",target:.reader)) }
+            else if reader.selecting { items.append(MoActivity(id:"ocr-selecting",kind:.selecting,title:"框选读屏",target:.reader)) }
+            if live.outputPlaying { items.append(MoActivity(id:"ocr-speaking",kind:.speaking,title:"正在回答",target:.reader,level:live.outputLevel)) }
+            if live.active {
+                let kind:MoActivityKind = live.closing ? .closing : live.capturing ? .listening : .connecting
+                let title = live.closing ? "结束对话" : live.capturing ? "正在聆听" : live.ready ? "启动录音" : "连接对话"
+                items.append(MoActivity(id:"ocr-live",kind:kind,title:title,target:.reader,level:live.inputLevel))
+            }
+            if let error = reader.lastError { items.append(MoActivity(id:"ocr-error",kind:.failed,title:"读屏异常",target:.reader,detail:error)) }
+            if let error = live.lastError { items.append(MoActivity(id:"ocr-live-error",kind:.failed,title:"对话异常",target:.reader,detail:error)) }
+            items.append(MoActivity(id:"ocr-ready",kind:.reviewing,title:"读屏就绪",target:.reader))
+        }
+        var result = MoActivityState.resolve(items)
+        result.context = target?.label ?? "读屏"
+        return result
+    }
 }

@@ -20,6 +20,9 @@ func sentenceCount(_ text: String) -> Int {
     var attachOCR: (ScreenTarget, String) async -> Bool = { _, _ in false }
     var reframeOCR: () -> Void = {}
     private var screenChanges: AnyCancellable?
+    private var activityChanges: AnyCancellable?
+    private var ocrActivityChanges = Set<AnyCancellable>()
+    @Published var activityExpanded = false
     var terminationRequested = false
     private(set) var launching = false
     @Published var recording = false
@@ -88,7 +91,30 @@ func sentenceCount(_ text: String) -> Int {
         launcher.onLaunch = { [weak self] target, capability, note in Task { @MainActor in await self?.launch(target,capability,note:note) } }
         launcher.onClose = { [weak self] in self?.launcherPanel.hide() }
         self.review.panels.islandExtraHeight = { [weak self] in
-            guard let self else { return 0 }; return (self.recording ? 44 : 0) + (self.toast.isEmpty ? 0 : 44)
+            guard let self else { return 0 }; return (self.activityExpanded ? 136 : 0) + (self.recording ? 44 : 0) + (self.toast.isEmpty ? 0 : 44)
+        }
+        self.review.externalActivities = { [weak self] in
+            guard let self else { return [] }
+            var items:[MoActivity] = []
+            if self.windowOCR.active {
+                let ocr = self.windowOCR.activityState
+                items += [ocr.primary] + ocr.secondary
+            }
+            if self.recording { items.append(MoActivity(id:"meeting",kind:.listening,title:"正在录音",target:.meeting,level:self.level)) }
+            if self.busy || self.processing { items.append(MoActivity(id:"meeting-work",kind:.summarizing,title:self.processing ? "整理会议" : "处理会议",target:.meeting)) }
+            if self.screenReader.busy { items.append(MoActivity(id:"reading",kind:.reading,title:"正在读屏",target:.reader)) }
+            else if self.screenReader.selecting { items.append(MoActivity(id:"read-selection",kind:.selecting,title:"框选读屏",target:.reader)) }
+            if self.screenReader.visible, let error = self.screenReader.lastError { items.append(MoActivity(id:"read-error",kind:.failed,title:"读屏异常",target:.reader,detail:error)) }
+            if !self.analysisError.isEmpty { items.append(MoActivity(id:"meeting-error",kind:.failed,title:"会议整理失败",target:.meeting,detail:self.analysisError)) }
+            return items
+        }
+        self.review.externalActivityContext = { [weak self] target in
+            guard let self else { return nil }
+            return target == .reader ? (self.windowOCR.active ? self.windowOCR.target?.label : self.screenReader.selected?.label) ?? "读屏" : self.title.isEmpty ? "会议" : self.title
+        }
+        activityChanges = objectWillChange.sink { [weak review = self.review] in review?.objectWillChange.send() }
+        for publisher in [self.windowOCR.objectWillChange,self.windowOCR.reader.objectWillChange,self.windowOCR.live.objectWillChange] {
+            publisher.sink { [weak self] in self?.objectWillChange.send() }.store(in:&ocrActivityChanges)
         }
         screenChanges = self.screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         recognition.onAudioStatus = { [weak self] status in self?.audioStatus = status }
@@ -113,6 +139,22 @@ func sentenceCount(_ text: String) -> Int {
     func quickReadScreen() {
         guard !terminationRequested else { return }
         showMenu = false; expanded = false; screenReader.visible = true; screenReader.captureRegion()
+    }
+    func returnToWork(_ destination:MoActivityTarget? = nil) {
+        guard !terminationRequested else { return }
+        let target = destination ?? (review.active ? .review : windowOCR.active || screenReader.visible ? .reader : recording || expanded ? .meeting : nil)
+        switch target {
+        case .reader:
+            showMenu = false; expanded = false
+            if windowOCR.active {
+                if let target = windowOCR.target, target.pid > 0 { NSRunningApplication(processIdentifier:target.pid)?.activate() }
+                windowOCR.panels.position(.zero)
+            } else { screenReader.visible = true }
+        case .meeting: showMenu = false; expanded = true
+        case .review, .chat, .summary, .cleanup:
+            review.showActivity(target ?? .review)
+        case nil: openLauncher()
+        }
     }
     func toggle() {
         screenReader.hide()
@@ -553,47 +595,52 @@ private struct DuckButtonStyle: ButtonStyle {
 }
 
 struct IslandActivityIndicator: View {
-    @ObservedObject var live: MoLiveSession
-    init(model:Recorder,review:ReviewModel,voice:VoiceInput,reader:ScreenReader) {
-        self.model = model; self.review = review; self.voice = voice; self.reader = reader; self.live = review.live
-    }
     @ObservedObject var model: Recorder
     @ObservedObject var review: ReviewModel
     @ObservedObject var voice: VoiceInput
     @ObservedObject var reader: ScreenReader
-    var title: String {
-        if live.active { return live.closing ? "结束对话" : (live.ready ? "语音对话" : "连接对话") }
-        if voice.voicePreparing { return "启动录音" }
-        if voice.dictating || model.recording { return "正在录音" }
-        if voice.voiceFinishing { return "正在转写" }
-        if reader.busy { return "正在读屏" }
-        if reader.selecting { return "框选读屏" }
-        if review.active {
-            if voice.lastError != nil { return "录音异常" }
-            if review.busy { return "正在处理" }
-            if review.picking { return "选择窗口" }
-            if review.historyPresented { return "历史批阅" }
-            if review.paused { return review.inputMode == .text ? "文字批阅" : "正在批阅" }
-            return "批阅就绪"
-        }
-        if reader.visible { return "读屏就绪" }
-        if model.busy || model.processing { return "正在处理" }
-        return "就绪"
+    @ObservedObject var live:MoLiveSession
+    @ObservedObject var summary:MoLiveSummary
+    init(model:Recorder,review:ReviewModel,voice:VoiceInput,reader:ScreenReader) {
+        self.model = model; self.review = review; self.voice = voice; self.reader = reader; live = review.live; summary = review.liveSummary
     }
-    var body: some View {
-        HStack(spacing:5) {
-            if voice.dictating || model.recording || live.ready {
-                let level = live.ready ? live.inputLevel : (voice.dictating ? voice.inputLevel : model.level)
-                HStack(spacing:2) {
-                    ForEach(0..<3) { i in Capsule().fill(.red).frame(width:2,height:4+level*CGFloat([9,16,11][i])) }
-                }.frame(width:12,height:22)
+    var title:String { review.activityState.primary.title }
+    var body:some View { MoIslandActivity(model:model,review:review,voice:voice,live:live,summary:summary,avatar:false) }
+}
+struct MoIslandActivity:View {
+    @ObservedObject var model:Recorder
+    @ObservedObject var review:ReviewModel
+    @ObservedObject var voice:VoiceInput
+    @ObservedObject var live:MoLiveSession
+    @ObservedObject var summary:MoLiveSummary
+    var avatar = false
+    var details = false
+    var body:some View {
+        TimelineView(.periodic(from:.now,by:1)) { _ in
+            let state = review.activityState
+            if details {
+                VStack(alignment:.leading,spacing:6) {
+                    if !state.context.isEmpty { Text(state.context).font(.system(size:10)).foregroundStyle(.secondary).lineLimit(1) }
+                    ForEach([state.primary]+state.secondary) { item in
+                        Button { model.returnToWork(item.target) } label: {
+                            HStack { Image(systemName:item.kind.symbol).foregroundStyle(item.kind.color); Text(item.title).lineLimit(1); Spacer(); Image(systemName:"chevron.right").font(.system(size:8)) }
+                        }.buttonStyle(.plain).font(.system(size:11)).help(item.detail)
+                    }
+                }.padding(12).frame(maxWidth:.infinity,alignment:.leading)
             } else {
-                Image(systemName:voice.lastError != nil && review.active ? "exclamationmark.circle" : (reader.busy || reader.selecting ? "viewfinder" : (voice.voiceFinishing ? "waveform" : "circle.fill")))
-                    .font(.system(size:voice.voicePreparing || voice.voiceFinishing || reader.busy ? 11 : 7))
-                    .foregroundStyle(voice.lastError != nil && review.active ? Color.orange : Color.green)
+                Button { model.returnToWork(avatar || state.primary.kind == .idle ? nil : state.primary.target) } label: {
+                    if avatar { MoActivityAvatar(state:state,size:28) }
+                    else { MoActivityStatus(state:state) }
+                }.buttonStyle(.plain).help(avatar ? "默默 · 返回当前工作；右键打开功能菜单" : state.description)
+                    .contextMenu {
+                        Button("会议",action:model.meeting).disabled(model.busy || model.recording)
+                        Button("读屏",action:model.openLauncher)
+                        Button("批阅",action:model.openLauncher)
+                        Divider()
+                        Button("功能面板",action:model.toggle)
+                    }
             }
-            Text(title).font(.system(size:11,weight:.medium)).foregroundStyle(.white).lineLimit(1)
-        }.accessibilityElement(children:.ignore).accessibilityLabel(title)
+        }
     }
 }
 
@@ -604,23 +651,18 @@ struct IslandView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
-                Button(action: model.toggle) {
-                    DuckMascot(recording: model.recording, level: model.level)
-                        .frame(width: 84, height: model.notchHeight)
-                }.buttonStyle(DuckButtonStyle())
-                    .help(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
-                    .accessibilityLabel(model.showMenu ? "收起功能控制面板" : "打开功能控制面板")
+                MoIslandActivity(model:model,review:model.review,voice:model.review.voice,live:model.review.live,summary:model.review.liveSummary,avatar:true)
+                    .frame(width:84,height:model.notchHeight)
                 Color.black.frame(width: model.notchWidth + 12, height: model.notchHeight)
-                Button {
-                    if model.review.active { model.review.panels.showSidebar() }
-                    else if model.screenReader.visible { model.expanded = false; model.showMenu = false }
-                    else { withAnimation(reduceMotion ? nil : .spring(response:0.4)) { model.showMenu = false; model.expanded.toggle() } }
-                } label: {
-                    IslandActivityIndicator(model:model,review:model.review,voice:model.review.voice,reader:model.screenReader)
-                        .frame(width:84)
-                }.buttonStyle(.plain).help("当前工作状态")
+                MoIslandActivity(model:model,review:model.review,voice:model.review.voice,live:model.review.live,summary:model.review.liveSummary)
+                    .frame(width:84)
 
-            }.frame(height: model.notchHeight + 2)
+            }.frame(height: model.notchHeight + 2).onHover { if $0 { model.activityExpanded = true } }
+            if model.activityExpanded {
+                ScrollView {
+                    MoIslandActivity(model:model,review:model.review,voice:model.review.voice,live:model.review.live,summary:model.review.liveSummary,details:true)
+                }.frame(height:136).background(.black,in:RoundedRectangle(cornerRadius:14))
+            }
             if model.recording && (model.showMenu || model.screenReader.visible || !model.expanded) {
                 HStack(spacing:12) {
                     TimelineView(.periodic(from:.now,by:1)) { context in
@@ -663,6 +705,7 @@ struct IslandView: View {
                 .frame(width:model.notchWidth+180,height:model.notchHeight + 2)
         }
         .frame(maxHeight: .infinity, alignment: .top)
+        .onHover { if !$0 { model.activityExpanded = false } }
         .preferredColorScheme(.dark)
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.85), value: model.expanded)
         .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.8), value: model.showMenu)
@@ -896,6 +939,7 @@ final class IslandPanel: NSPanel {
     private let reviewHotKey = ReviewHotKey()
     var expansion: AnyCancellable?
     var screenLayout: AnyCancellable?
+    var activityLayout: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
         panel = IslandPanel(contentRect: NSRect(x: 0, y: 0, width: 490, height: 330), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false; panel.backgroundColor = .clear
@@ -908,6 +952,9 @@ final class IslandPanel: NSPanel {
         position()
         expansion = model.$expanded.combineLatest(model.$showMenu, model.$busy, model.$toast).sink { [weak self] expanded, menu, _, toast in
             DispatchQueue.main.async { self?.position(expanded: expanded, menu: menu, toast: toast) }
+        }
+        activityLayout = model.$activityExpanded.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { self?.position() }
         }
         screenLayout = model.screenReader.objectWillChange.sink { [weak self] in
             DispatchQueue.main.async { self?.position() }
@@ -954,7 +1001,7 @@ final class IslandPanel: NSPanel {
         let isExpanded = expanded ?? model.expanded
         let screenReader = model.screenReader.visible && !(menu ?? model.showMenu)
         let width = screenReader ? max(494, notch + 180) : (isExpanded && !(menu ?? model.showMenu) ? max(494, notch + 180) : notch + 180)
-        let height = model.notchHeight + ((menu ?? model.showMenu) ? 84 : (screenReader ? model.screenReader.panelHeight : (isExpanded ? 452 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording && ((menu ?? model.showMenu) || screenReader || !isExpanded) ? 44 : 0)
+        let height = (model.activityExpanded ? 136.0 : 0.0) + model.notchHeight + ((menu ?? model.showMenu) ? 84 : (screenReader ? model.screenReader.panelHeight : (isExpanded ? 452 : 2))) + ((toast ?? model.toast).isEmpty ? 0 : 44) + (model.recording && ((menu ?? model.showMenu) || screenReader || !isExpanded) ? 44 : 0)
         panel.setFrame(NSRect(x: center - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
         if model.review.active { model.review.panels.positionSidebar(.zero) }
     }
