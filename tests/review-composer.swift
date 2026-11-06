@@ -11,7 +11,7 @@ Task { @MainActor in
     model.snapshots = [shot]; model.current = shot
     model.textChatResponder = { input,_ in
         let data = try JSONSerialization.jsonObject(with:Data(input.utf8)) as! [String:Any]
-        precondition(data["question"] as? String == "你好默默")
+        precondition(data["question"] as? String == "你好小墨小墨")
         return "你好，我可以帮你整理批阅意见。"
     }
     model.panels.showOverlay(shot)
@@ -33,13 +33,13 @@ Task { @MainActor in
     let consumed = field.delegate?.textView?(field,doCommandBy:#selector(NSResponder.insertNewline(_:))) ?? false
     precondition(!consumed && model.live.messages.isEmpty, "IME composition must not send")
     field.unmarkText()
-    field.insertText("你好默默",replacementRange:NSRange(location:0,length:field.string.utf16.count))
-    precondition(model.chatDraft == "你好默默")
+    field.insertText("你好小墨小墨",replacementRange:NSRange(location:0,length:field.string.utf16.count))
+    precondition(model.chatDraft == "你好小墨小墨")
     let enter = NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:ProcessInfo.processInfo.systemUptime,windowNumber:window.windowNumber,context:nil,characters:"\r",charactersIgnoringModifiers:"\r",isARepeat:false,keyCode:36)!
     NSApp.postEvent(enter,atStart:false)
     try await Task.sleep(nanoseconds:50_000_000)
     while model.textChatBusy { try await Task.sleep(nanoseconds:1_000_000) }
-    precondition(model.live.messages.count == 2 && model.live.messages[0].text == "你好默默" && model.live.messages[1].source == "agent")
+    precondition(model.live.messages.count == 2 && model.live.messages[0].text == "你好小墨小墨" && model.live.messages[1].source == "agent")
     precondition(model.chatDraft.isEmpty && model.regions.isEmpty && !model.speakingEnabled)
     model.chatDraft = "第二个问题"
     model.sendChatMessage(using:{ _,_ in throw NotesFailure(detail:"fixture reply failure") })

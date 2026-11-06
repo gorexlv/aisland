@@ -92,7 +92,7 @@ struct ReviewOrbitView: View {
                     .background(model.speakingEnabled ? Color(red:0.08,green:0.45,blue:0.94) : Color(red:0.30,green:0.35,blue:0.39),in:Circle())
                     .overlay(Circle().stroke(.white.opacity(0.9),lineWidth:1.5))
             }.disabled(model.busy || model.historyPresented)
-                .help(model.speakingEnabled ? "发言：呼唤默默或提问可对话；点击切为静默" : "静默：只听写记录，不回复；点击开启发言")
+                .help(model.speakingEnabled ? "发言：呼唤小墨或提问可对话；点击切为静默" : "静默：只听写记录，不回复；点击开启发言")
                 .accessibilityLabel(model.speakingEnabled ? "发言模式，切换静默" : "静默模式，切换发言")
                 .position(x:91,y:105)
 
@@ -770,7 +770,7 @@ struct MoActivityAvatar:View {
             ZStack {
                 Circle().stroke(state.primary.kind.color.opacity(0.3+phase*0.5),lineWidth:2).scaleEffect(1+phase*0.08)
                 Image(nsImage:MascotAssets.images["jay"]!).resizable().interpolation(.high).scaledToFill()
-                    .frame(width:size-4,height:size-4).scaleEffect(1.3,anchor:UnitPoint(x:0.46,y:0.62)).clipShape(Circle())
+                    .frame(width:size-4,height:size-4).clipShape(Circle())
                     .overlay(Circle().stroke(.white.opacity(0.65),lineWidth:1))
                 Image(systemName:state.primary.kind.symbol).font(.system(size:max(7,size*0.22),weight:.semibold)).foregroundStyle(.white)
                     .padding(3).background(state.primary.kind.color,in:Circle()).offset(x:size*0.35,y:size*0.35)

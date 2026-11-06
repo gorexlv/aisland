@@ -112,7 +112,7 @@ struct WindowOCROrbitView: View {
                     .background(session.speakingEnabled ? Color(red:0.08,green:0.45,blue:0.94) : Color(red:0.30,green:0.35,blue:0.39),in:Circle())
                     .overlay(Circle().stroke(.white.opacity(0.9),lineWidth:1.5))
             }.disabled(!session.speakingEnabled && !hasText)
-                .help(!session.speakingEnabled && !hasText ? "请先框选识别文字" : (session.speakingEnabled ? "发言：可就识别文字与默默对话；点击切为静默" : "静默；点击开启发言"))
+                .help(!session.speakingEnabled && !hasText ? "请先框选识别文字" : (session.speakingEnabled ? "发言：可就识别文字与小墨对话；点击切为静默" : "静默；点击开启发言"))
                 .accessibilityLabel(session.speakingEnabled ? "发言模式，切换静默" : "静默模式，切换发言")
                 .position(x:91,y:105)
         }.frame(width:128,height:124).buttonStyle(.plain)
@@ -174,7 +174,7 @@ struct WindowOCRRecordView: View {
                 ScrollView {
                     VStack(alignment:.leading,spacing:4) {
                         ForEach(live.messages.suffix(6)) { message in
-                            Text((message.role == "assistant" ? "默默：" : "你：") + message.text).font(.system(size:11)).foregroundStyle(message.role == "assistant" ? Color.white : IslandStyle.secondary).frame(maxWidth:.infinity,alignment:.leading)
+                            Text((message.role == "assistant" ? "小墨：" : "你：") + message.text).font(.system(size:11)).foregroundStyle(message.role == "assistant" ? Color.white : IslandStyle.secondary).frame(maxWidth:.infinity,alignment:.leading)
                         }
                     }
                 }.frame(maxHeight:60)
