@@ -11,11 +11,15 @@ final class FakeLark: @unchecked Sendable {
     private var _error: String?
     private var _replyError: String?
     private var _sentCount = 0
-    private var _onList: (() -> Void)?
+    private var _replyRaw: Data?
+    private var _onRecent: ((Int) -> Void)?
+    private var _recentCount = 0
     var calls: [[String]] { lock.lock(); defer { lock.unlock() }; return _calls }
     var replies: [[String]] { calls.filter { $0.count > 1 && $0[1] == "+messages-reply" } }
     func setMessages(_ value: [[String: Any]]) { lock.lock(); _messages = value; lock.unlock() }
     func setError(_ value: String?) { lock.lock(); _error = value; lock.unlock() }
+    func setReplyRaw(_ value: Data?) { lock.lock(); _replyRaw = value; lock.unlock() }
+    func setOnRecent(_ value: ((Int) -> Void)?) { lock.lock(); _onRecent = value; _recentCount = 0; lock.unlock() }
     func setReplyError(_ value: String?) { lock.lock(); _replyError = value; lock.unlock() }
     static let me = "ou_me"
     static func json(_ object: Any) -> Data { try! JSONSerialization.data(withJSONObject: object) }
@@ -29,6 +33,12 @@ final class FakeLark: @unchecked Sendable {
         LarkCLI(run: { [self] args in
             lock.lock(); _calls.append(args); let error = _error; let replyError = _replyError; let messages = _messages; _sentCount += args.count > 1 && args[1] == "+messages-reply" ? 1 : 0; let sentN = _sentCount; lock.unlock()
             if args[0] == "auth" { return Self.json(["identity": "user", "brand": "lark", "identities": ["user": ["available": true, "tokenStatus": "valid", "openId": Self.me, "userName": "Me"]]]) }
+            if args.count > 1, args[1] == "+chat-messages-list", !args.contains(where: { $0.hasPrefix("--start=") }) {
+                lock.lock(); _recentCount += 1; let n = _recentCount; let hook = _onRecent; lock.unlock()
+                hook?(n)
+            }
+            lock.lock(); let raw = _replyRaw; lock.unlock()
+            if let raw, args.count > 1, args[1] == "+messages-reply" { return raw }
             if let replyError, args.count > 1, args[1] == "+messages-reply" { throw LarkError(message: replyError) }
             if let error { throw LarkError(message: error) }
             switch args[1] {
@@ -355,6 +365,82 @@ Task { @MainActor in
         let ok = larkRunProcess(executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"], timeout: 5)!
         precondition(ok.status == 0 && String(decoding: ok.out, as: UTF8.self) == "out\n" && String(decoding: ok.err, as: UTF8.self) == "err\n" && !ok.timedOut)
         precondition(larkRunProcess(executable: "/nonexistent/x", arguments: [], timeout: 1) == nil)
+    }
+
+    // --- N1/N4: angle brackets are always escaped; manual sends keep URLs and length ---
+    for bad in ["<a<at></at>t user_id=\"all\">x", "<at user_id=\"all\"></at>", "<<at user_id=\"all\">>", "<at\nuser_id=\"all\">"] {
+        let cleaned = larkSanitizeReply(bad)
+        precondition(!cleaned.contains("<") && !cleaned.contains(">") && !cleaned.contains("<at"), "\(cleaned)")
+        precondition(!larkEscapeAngles(bad).contains("<") && !larkEscapeAngles(bad).contains(">"))
+    }
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p, auto: false)
+        fake.setMessages([F.msg("om_n1", "hi", at: "2026-11-06 08:31")])
+        await s.pollOnce()
+        let long = "详见 https://example.com/doc " + String(repeating: "长", count: 700) + " <at user_id=\"all\">x</at>"
+        s.setDraft("om_n1", long)
+        await s.send("om_n1")
+        let text = fake.replies[0].first { $0.hasPrefix("--text=") }!
+        precondition(text.contains("https://example.com/doc") && text.count > 600 && !text.contains("<") && !text.contains(">") && text.contains("＜at user_id=\"all\"＞x＜/at＞"), "manual: escape only")
+        _ = await s.end()
+        // auto path: full sanitize
+        let f2 = FakeLark(); let s2 = await makeSession(f2, chat: p2p)
+        s2.generate = { _ in "见 https://e.test <a<at></at>t user_id=\"all\">x" }
+        f2.setMessages([F.msg("om_n2", "hi", at: "2026-11-06 08:31")])
+        await s2.pollOnce()
+        let auto = f2.replies[0].first { $0.hasPrefix("--text=") }!
+        precondition(!auto.contains("https://") && !auto.contains("<") && !auto.contains(">") && auto.contains("（链接已省略）"), auto)
+        _ = await s2.end()
+    }
+
+    // --- N5: settings flipped during the slow re-fetch keep the message as a draft ---
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        let flag = NSLock(); nonisolated(unsafe) var enabled = true
+        s.autoReplyEnabled = { flag.lock(); defer { flag.unlock() }; return enabled }
+        fake.setOnRecent { n in if n == 2 { flag.lock(); enabled = false; flag.unlock() } }   // 1st = context, 2nd = pre-send re-check
+        fake.setMessages([F.msg("om_f1", "在吗", at: "2026-11-06 08:31")])
+        await s.pollOnce()
+        precondition(s.records[0].state == .draft && fake.replies.isEmpty, "toggle off during re-fetch -> draft: \(s.records[0].state)")
+        _ = await s.end()
+    }
+
+    // --- missing scope ---
+    do {
+        let envelope = #"{"ok":false,"error":{"type":"permission","subtype":"missing_scope","message":"missing","missing_scopes":["im:message.send_as_user"]}}"#
+        let e = larkError(fromRaw: envelope)
+        precondition(e.missingScope && e.message == "缺少发送权限 im:message.send_as_user：在终端运行 lark-cli auth login --scope \"im:message.send_as_user\" 完成授权后点重试", e.message)
+        precondition(!larkError(fromRaw: "{\"ok\":false,\"error\":{\"subtype\":\"other\"}}").missingScope)
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        fake.setReplyRaw(Data(envelope.utf8))
+        fake.setMessages([F.msg("om_s1", "1", at: "2026-11-06 08:31", from: "ou_1")])
+        await s.pollOnce()
+        precondition(s.records[0].state.isFailed && s.records[0].state.label.hasPrefix("缺少发送权限 im:message.send_as_user") && s.status.hasPrefix("缺少发送权限"), s.records[0].state.label)
+        precondition(s.records[0].draft == "好的，收到", "draft kept")
+        fake.setMessages([F.msg("om_s2", "2", at: "2026-11-06 08:32", from: "ou_2")])
+        await s.pollOnce()
+        precondition(s.records.last?.state == .draft && fake.replies.count == 1, "auto-reply paused for the chat, no retry each poll")
+        fake.setReplyRaw(nil)
+        await s.send("om_s1")   // manual retry succeeds and lifts the block
+        precondition(s.records[0].state == .sentManual && fake.replies.count == 2)
+        fake.setMessages([F.msg("om_s3", "3", at: "2026-11-06 08:33", from: "ou_3")])
+        await s.pollOnce()
+        precondition(s.records.last?.state == .sentAuto)
+        _ = await s.end()
+        let granted = #"{"identities":{"user":{"available":true,"scope":"im:message im:message.send_as_user offline_access"}}}"#
+        let missing = #"{"identities":{"user":{"available":true,"scope":"im:message offline_access"}}}"#
+        precondition(larkScopeCheckMessage(Data(granted.utf8)).hasPrefix("已具备发送权限"))
+        precondition(larkScopeCheckMessage(Data(missing.utf8)).hasPrefix("缺少发送权限 im:message.send_as_user") && larkScopeCheckMessage(Data(missing.utf8)).contains("lark-cli auth login --scope"))
+        precondition(larkScopeCheckMessage(Data("{}".utf8)).contains("未获取到"))
+    }
+
+    // --- process runner stress: no crash on teardown with busy writers ---
+    for _ in 0..<20 {
+        let r = larkRunProcess(executable: "/bin/sh", arguments: ["-c", "yes | head -c 300000; echo done 1>&2"], timeout: 5)!
+        precondition(r.out.count == 300000 && String(decoding: r.err, as: UTF8.self) == "done\n")
     }
 
     // --- render ---

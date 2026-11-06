@@ -173,6 +173,17 @@ enum SettingsSection: String, CaseIterable { case general, live, meeting, lark }
     @Published var status = LarkAuthStatus.unknown
     @Published var detected: String?
     @Published var checking = false
+    @Published var scopeMessage = ""
+    func checkScope(manual: String?) {
+        let runner = self.runner
+        Task {
+            let text: String = await Task.detached {
+                guard let path = LarkCLIDetector.resolve(manual: manual) else { return "未找到 lark-cli，请安装或手动填写路径" }
+                return larkScopeCheckMessage(runner(path, ["auth", "status", "--json"]).output)
+            }.value
+            scopeMessage = text
+        }
+    }
     static var defaultRunner: LarkProbeRunner = LarkAuthProbe.processRunner   // tests inject a fake
     var runner: LarkProbeRunner = LarkProbeModel.defaultRunner
     func refresh(manual: String?) {
@@ -311,6 +322,10 @@ struct LarkSettingsForm: View {
                     .onSubmit { commitPath() }
                     .onChange(of: path) { commitPath() }
                 Button("重新检测") { commitPath(); probe.refresh(manual: LarkProxySettings.cliPath) }.disabled(probe.checking)
+            }
+            HStack(spacing: 8) {
+                Button("检查发送权限") { commitPath(); probe.checkScope(manual: LarkProxySettings.cliPath) }
+                if !probe.scopeMessage.isEmpty { Text(probe.scopeMessage).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
             }
             if let detected = probe.detected { Text("使用：" + detected).font(.system(size: 11)).foregroundStyle(.secondary) }
             HStack(spacing: 6) {

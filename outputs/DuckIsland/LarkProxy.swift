@@ -25,6 +25,7 @@ struct LarkMessage: Identifiable, Equatable {
 }
 struct LarkError: LocalizedError, Equatable {
     let message: String
+    var missingScope = false
     var errorDescription: String? { message }
 }
 
@@ -50,18 +51,31 @@ func larkRunProcess(executable: String, arguments: [String], timeout: TimeInterv
     let out = Pipe(), err = Pipe()
     process.standardOutput = out; process.standardError = err; process.standardInput = FileHandle.nullDevice
     let outBuffer = LarkPipeBuffer(), errBuffer = LarkPipeBuffer()
-    for (pipe, buffer) in [(out, outBuffer), (err, errBuffer)] {
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if chunk.isEmpty { handle.readabilityHandler = nil } else { buffer.append(chunk) }
-        }
-    }
     let done = DispatchSemaphore(value: 0)
     process.terminationHandler = { _ in done.signal() }
     do { try process.run() } catch {
-        out.fileHandleForReading.readabilityHandler = nil; err.fileHandleForReading.readabilityHandler = nil
         try? out.fileHandleForReading.close(); try? err.fileHandleForReading.close()
         return nil
+    }
+    // All pipe reads happen on one serial queue via read sources; teardown cancels them and waits on the queue before
+    // draining and closing, so no handler can touch a closed descriptor.
+    let queue = DispatchQueue(label: "lark.pipe.reader")
+    @Sendable func drain(_ fd: Int32, _ buffer: LarkPipeBuffer) -> Bool {   // true on EOF
+        var chunk = [UInt8](repeating: 0, count: 65536)
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            if n > 0 { buffer.append(Data(chunk[0..<n])); continue }
+            return n == 0
+        }
+    }
+    var sources: [DispatchSourceRead] = []
+    for (pipe, buffer) in [(out, outBuffer), (err, errBuffer)] {
+        let fd = pipe.fileHandleForReading.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        source.setEventHandler { if drain(fd, buffer) { source.cancel() } }
+        source.resume()
+        sources.append(source)
     }
     var timedOut = false
     if done.wait(timeout: .now() + timeout) == .timedOut {
@@ -74,14 +88,11 @@ func larkRunProcess(executable: String, arguments: [String], timeout: TimeInterv
         process.terminate()
         if done.wait(timeout: .now() + 1) == .timedOut { kill(pid, SIGKILL); _ = done.wait(timeout: .now() + 1) }
     }
+    for source in sources { source.cancel() }
+    queue.sync {}   // no handler is running or will run after this
     for (pipe, buffer) in [(out, outBuffer), (err, errBuffer)] {
-        let handle = pipe.fileHandleForReading
-        handle.readabilityHandler = nil
-        let fd = handle.fileDescriptor
-        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
-        var chunk = [UInt8](repeating: 0, count: 65536)
-        while true { let n = read(fd, &chunk, chunk.count); if n <= 0 { break }; buffer.append(Data(chunk[0..<n])) }
-        try? handle.close()
+        _ = drain(pipe.fileHandleForReading.fileDescriptor, buffer)
+        try? pipe.fileHandleForReading.close()
     }
     return (process.isRunning ? -1 : process.terminationStatus, outBuffer.value, errBuffer.value, timedOut)
 }
@@ -101,9 +112,11 @@ func larkSanitizeReply(_ text: String) -> String {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { continue }
         result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: replacement)
     }
-    result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+    result = larkEscapeAngles(result.trimmingCharacters(in: .whitespacesAndNewlines))
     return result.count > 500 ? String(result.prefix(500)) : result
 }
+/// Full-width brackets so no tag (e.g. a reassembled <at user_id="all">) can survive; the only change for manual sends.
+func larkEscapeAngles(_ text: String) -> String { text.replacingOccurrences(of: "<", with: "＜").replacingOccurrences(of: ">", with: "＞") }
 
 /// Process-wide count of auto-send attempts per chat (survives chat switches and re-attach).
 @MainActor final class LarkSendLedger {
@@ -161,14 +174,14 @@ struct LarkCLI {
         if result.timedOut { throw LarkError(message: "lark-cli 响应超时（\(Int(timeout)) 秒）") }
         guard result.status == 0 else {
             let raw = String(decoding: result.err.isEmpty ? result.out : result.err, as: UTF8.self)
-            throw LarkError(message: larkFriendlyError(larkErrorText(raw)))
+            throw larkError(fromRaw: raw)
         }
         return result.out
     }
 
     private func object(_ data: Data) throws -> [String: Any] {
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw LarkError(message: "无法解析 lark-cli 输出") }
-        if root["ok"] as? Bool == false { throw LarkError(message: larkFriendlyError(larkErrorText(String(decoding: data, as: UTF8.self)))) }
+        if root["ok"] as? Bool == false { throw larkError(fromRaw: String(decoding: data, as: UTF8.self)) }
         return root
     }
     private func payload(_ data: Data) throws -> [String: Any] { (try object(data))["data"] as? [String: Any] ?? [:] }
@@ -244,6 +257,25 @@ struct LarkCLI {
         }
         return find(root["data"])
     }
+}
+
+/// Builds a Chinese error from raw CLI output; recognises the `missing_scope` envelope.
+func larkError(fromRaw raw: String) -> LarkError {
+    if let data = raw.data(using: .utf8), let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+       let error = root["error"] as? [String: Any], (error["subtype"] as? String) == "missing_scope" {
+        let scopes = (error["missing_scopes"] as? [String] ?? []).filter { !$0.isEmpty && !$0.contains("\"") }
+        let list = scopes.isEmpty ? "im:message.send_as_user" : scopes.joined(separator: " ")
+        return LarkError(message: "缺少发送权限 \(list)：在终端运行 lark-cli auth login --scope \"\(list)\" 完成授权后点重试", missingScope: true)
+    }
+    return LarkError(message: larkFriendlyError(larkErrorText(raw)))
+}
+
+/// Read-only scope check over `auth status --json` (identities.user.scope is a space-separated list).
+func larkScopeCheckMessage(_ data: Data, scope: String = "im:message.send_as_user") -> String {
+    guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "无法解析 lark-cli 输出" }
+    let user = (root["identities"] as? [String: Any])?["user"] as? [String: Any]
+    guard let granted = user?["scope"] as? String else { return "未获取到授权范围；如发送失败请运行：lark-cli auth login --scope \"\(scope)\"" }
+    return granted.split(separator: " ").contains(Substring(scope)) ? "已具备发送权限 \(scope)" : "缺少发送权限 \(scope)：在终端运行 lark-cli auth login --scope \"\(scope)\""
 }
 
 /// Extracts `error.message` from a lark-cli JSON error envelope when present.
@@ -388,6 +420,8 @@ struct LarkProxyRecord: Identifiable, Equatable {
     private var cursor = Date.distantFuture
     private var seen = Set<String>()
     private var ownSent = Set<String>()
+    /// Chats whose sends failed for a missing scope: auto-reply stays off (drafts kept) until a manual send succeeds.
+    private var scopeBlocked = Set<String>()
     private var token = UUID()
     private var trackFailures = 0
     private var tracking: Timer?
@@ -531,11 +565,13 @@ struct LarkProxyRecord: Identifiable, Equatable {
         // Auto-send gates: setting/pause, user confirmation, freshness, per-chat rate limit, and nobody replied meanwhile.
         guard autoReplyOn, confirmed, !text.isEmpty, now().timeIntervalSince(item.time) <= 300,
               ledger.count(chat: chat.id, now: now()) < maxReplies() else { return }
-        guard let latestHistory = try? await cli.recentMessages(chatID: chat.id), current == token else { return }
+        guard !scopeBlocked.contains(chat.id), let latestHistory = try? await cli.recentMessages(chatID: chat.id), current == token else { return }
         if latestHistory.contains(where: { $0.senderID == me && $0.id != item.id && !ownSent.contains($0.id) && $0.time >= item.time }) {
             update(item.id) { $0.state = .skipped("你已回复，跳过"); $0.draft = "" }
             return
         }
+        // Settings may have changed during the (slow) generation and re-fetch: re-check right before sending.
+        guard current == token, autoReplyOn, confirmed, !scopeBlocked.contains(chat.id) else { return }
         await send(item.id, auto: true)
     }
 
@@ -548,7 +584,8 @@ struct LarkProxyRecord: Identifiable, Equatable {
     /// Sends the (possibly edited) draft as a reply. Failed records can be retried; the idempotency key prevents duplicates.
     func send(_ id: String, auto: Bool = false) async {
         guard let cli, let chat, let record = records.first(where: { $0.id == id }), record.state == .draft || record.state.isFailed else { return }
-        let text = larkSanitizeReply(record.draft)
+        // Auto replies get the full sanitize; text the user typed only has angle brackets escaped (no URL removal or truncation).
+        let text = auto ? larkSanitizeReply(record.draft) : larkEscapeAngles(record.draft.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !text.isEmpty else { update(id) { $0.state = .failed("回复为空，无法发送") }; return }
         let current = token
         update(id) { $0.state = .sending; $0.draft = text }
@@ -558,9 +595,14 @@ struct LarkProxyRecord: Identifiable, Equatable {
             if let sent { ownSent.insert(sent) }
             guard current == token else { return }
             update(id) { $0.state = auto ? .sentAuto : .sentManual }
+            if !auto { scopeBlocked.remove(chat.id) }
         } catch {
             guard current == token else { return }
-            update(id) { $0.state = .failed("发送失败：" + message(error)) }
+            if (error as? LarkError)?.missingScope == true {
+                scopeBlocked.insert(chat.id)
+                update(id) { $0.state = .failed(message(error)) }
+                status = message(error)
+            } else { update(id) { $0.state = .failed("发送失败：" + message(error)) } }
         }
     }
     func discard(_ id: String) {
@@ -593,7 +635,7 @@ struct LarkProxyRecord: Identifiable, Equatable {
         pollTask?.cancel(); pollTask = nil
         panels.close()
         active = false; target = nil; chat = nil; needsPicker = false; chats = []; searchResults = []; records = []
-        status = ""; lastPoll = nil; paused = false; generating = false; cli = nil; seen = []; ownSent = []; confirmed = false
+        status = ""; lastPoll = nil; paused = false; generating = false; cli = nil; seen = []; ownSent = []; scopeBlocked = []; confirmed = false
         return true
     }
 }
@@ -730,10 +772,11 @@ struct LarkProxyRecordView: View {
                 TextEditor(text: Binding(get: { session.records.first(where: { $0.id == record.id })?.draft ?? "" }, set: { session.setDraft(record.id, $0) }))
                     .font(.system(size: 11)).scrollContentBackground(.hidden).padding(3)
                     .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 6)).frame(height: 44)
+                Text("发送前会转义尖括号").font(.system(size: 10)).foregroundStyle(IslandStyle.secondary)
                 HStack(spacing: 8) {
                     Spacer(minLength: 2)
                     Button("丢弃") { session.discard(record.id) }.font(.system(size: 11)).foregroundStyle(IslandStyle.secondary)
-                    Button("发送") { Task { await session.send(record.id) } }.font(.system(size: 11, weight: .medium)).foregroundStyle(Color.blue)
+                    Button(record.state.isFailed ? "重试" : "发送") { Task { await session.send(record.id) } }.font(.system(size: 11, weight: .medium)).foregroundStyle(Color.blue)
                 }
             } else if record.state == .sentAuto || record.state == .sentManual || record.state == .sending {
                 if !record.draft.isEmpty { Text("小墨：" + record.draft).font(.system(size: 11)).lineLimit(2) }
