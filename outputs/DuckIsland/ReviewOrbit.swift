@@ -81,6 +81,7 @@ struct ReviewOrbitView: View {
                     Button(model.inputMode == .audio ? "切换文字框选" : "切换语音框选") { Task { await model.setInputMode(model.inputMode == .audio ? .text : .audio) } }.disabled(model.busy || live.active)
                     Button("截取新画面") { model.pause() }.disabled(!model.canSwitchSnapshots)
                     Button("完成并查看历史（\(model.snapshots.count)）") { model.completeReview() }.disabled(model.busy || model.snapshots.isEmpty)
+                    if model.snapshots.isEmpty { Button("恢复最近批阅") { model.onRestoreRequest?() }.disabled(model.busy) }
                     Divider()
                     Button("保存并关闭批阅") { model.close() }.disabled(model.busy)
                 }.position(x:64,y:84)
@@ -105,6 +106,15 @@ struct MoOrb: View {
     let ringColor: Color
     let busy: Bool
     let activity:() -> MoActivityState
+    init(ringColor:Color,busy:Bool,activity:@escaping () -> MoActivityState) {
+        self.ringColor = ringColor; self.busy = busy; self.activity = activity
+    }
+    // Preserve the call used by the separately merged OCR toolbar.
+    init(ringColor:Color,busy:Bool,listening:Bool) {
+        self.init(ringColor:ringColor,busy:busy,activity:{
+            MoActivityState.resolve([MoActivity(id:"ocr",kind:listening ? .listening : busy ? .reading : .reviewing,title:listening ? "正在聆听" : busy ? "正在读屏" : "读屏就绪",target:.reader)])
+        })
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {

@@ -59,11 +59,39 @@ Task { @MainActor in
     // Errors
     struct Denied: Error {}
     (m, launches, closes) = await makeModel { throw Denied() }
-    precondition(m.status.contains("录制屏幕"))
+    precondition(m.status.contains("录制屏幕") && m.permissionError)
     m.confirm(); precondition(launches().isEmpty)
     (m, launches, closes) = await makeModel { [] }
-    precondition(m.status == "没有可选窗口，请打开应用后重试")
+    precondition(m.status == "没有可选窗口，请打开应用后重试" && !m.permissionError)
     m.confirm(); precondition(launches().isEmpty && m.step == .window)
+    // Stale load must not overwrite a newer open or a closed launcher
+    let stale = LauncherModel()
+    var waiting: [CheckedContinuation<[ScreenTarget],Never>] = []
+    stale.loadTargets = { await withCheckedContinuation { waiting.append($0) } }
+    let t1 = Task { await stale.open(frontPID:nil) }
+    while waiting.count < 1 { await Task.yield() }
+    let t2 = Task { await stale.open(frontPID:nil) }
+    while waiting.count < 2 { await Task.yield() }
+    waiting[1].resume(returning:[b]); await t2.value
+    precondition(stale.targets.map(\.id) == [2] && stale.visible)
+    waiting[0].resume(returning:[a,c]); await t1.value
+    precondition(stale.targets.map(\.id) == [2] && stale.status.isEmpty, "stale load overwrote newer open")
+    let t3 = Task { await stale.open(frontPID:nil) }
+    while waiting.count < 3 { await Task.yield() }
+    stale.close()
+    waiting[2].resume(returning:[a]); await t3.value
+    precondition(!stale.visible && stale.targets.isEmpty, "load after Esc must be dropped")
+    stale.loadTargets = { throw Denied() }
+    let t4 = Task { await stale.open(frontPID:nil) }
+    await t4.value; stale.close()
+    precondition(stale.visible == false)
+    precondition(launcherDeleteAllowed(isRepeat:false,responder:nil) && !launcherDeleteAllowed(isRepeat:true,responder:nil))
+    let tv = NSTextView(); precondition(launcherDeleteAllowed(isRepeat:false,responder:tv))
+    tv.setMarkedText("ni",selectedRange:NSRange(location:2,length:0),replacementRange:NSRange(location:0,length:0))
+    precondition(!launcherDeleteAllowed(isRepeat:false,responder:tv), "marked text must block tag deletion")
+    // reset is synchronous and clears stale state
+    m.target = a; m.step = .capability; m.permissionError = true; m.reset()
+    precondition(m.step == .window && m.target == nil && !m.permissionError && m.targets.isEmpty)
     print("PASS: launcher logic")
     exit(0)
 }

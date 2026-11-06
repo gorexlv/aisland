@@ -13,10 +13,18 @@ func sentenceCount(_ text: String) -> Int {
 @MainActor final class Recorder: ObservableObject {
     let screenReader: ScreenReader
     let review: ReviewModel
+    let windowOCR: WindowOCRSession
+    let launcher = LauncherModel()
+    lazy var launcherPanel = LauncherPanel(model:launcher)
+    var attachReview: (ScreenTarget, String) async -> Bool = { _, _ in false }
+    var attachOCR: (ScreenTarget, String) async -> Bool = { _, _ in false }
+    var reframeOCR: () -> Void = {}
     private var screenChanges: AnyCancellable?
     private var activityChanges: AnyCancellable?
+    private var ocrActivityChanges = Set<AnyCancellable>()
     @Published var activityExpanded = false
     var terminationRequested = false
+    private(set) var launching = false
     @Published var recording = false
     @Published var recordingStartedAt: Date?
     @Published var audioStatus = "系统声音：等待接入   ·   麦克风：等待接入"
@@ -67,18 +75,31 @@ func sentenceCount(_ text: String) -> Int {
     private(set) var warning = ""
     var count: Int { sentenceCount(transcript) }
 
-    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil) {
+    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil, windowOCR: WindowOCRSession? = nil) {
         self.screenReader = screenReader ?? ScreenReader()
         self.recognition = recognition
-        self.review = review ?? ReviewModel()
+        let reviewModel = review ?? ReviewModel()
+        self.review = reviewModel
+        self.windowOCR = windowOCR ?? WindowOCRSession(voice:reviewModel.voice)
         self.screenReader.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onNotice = { [weak self] text in self?.notify(text) }
+        self.review.onRestoreRequest = { [weak self] in Task { @MainActor in await self?.restoreLatestReview() } }
+        let ocr = self.windowOCR
+        attachReview = { [reviewModel] target, note in await reviewModel.attach(target,note:note) }
+        attachOCR = { target, note in await ocr.attach(target,note:note) }
+        reframeOCR = { ocr.reframe() }
+        launcher.onLaunch = { [weak self] target, capability, note in Task { @MainActor in await self?.launch(target,capability,note:note) } }
+        launcher.onClose = { [weak self] in self?.launcherPanel.hide() }
         self.review.panels.islandExtraHeight = { [weak self] in
             guard let self else { return 0 }; return (self.activityExpanded ? 136 : 0) + (self.recording ? 44 : 0) + (self.toast.isEmpty ? 0 : 44)
         }
         self.review.externalActivities = { [weak self] in
             guard let self else { return [] }
             var items:[MoActivity] = []
+            if self.windowOCR.active {
+                let ocr = self.windowOCR.activityState
+                items += [ocr.primary] + ocr.secondary
+            }
             if self.recording { items.append(MoActivity(id:"meeting",kind:.listening,title:"正在录音",target:.meeting,level:self.level)) }
             if self.busy || self.processing { items.append(MoActivity(id:"meeting-work",kind:.summarizing,title:self.processing ? "整理会议" : "处理会议",target:.meeting)) }
             if self.screenReader.busy { items.append(MoActivity(id:"reading",kind:.reading,title:"正在读屏",target:.reader)) }
@@ -89,9 +110,12 @@ func sentenceCount(_ text: String) -> Int {
         }
         self.review.externalActivityContext = { [weak self] target in
             guard let self else { return nil }
-            return target == .reader ? self.screenReader.selected?.label ?? "读屏" : self.title.isEmpty ? "会议" : self.title
+            return target == .reader ? (self.windowOCR.active ? self.windowOCR.target?.label : self.screenReader.selected?.label) ?? "读屏" : self.title.isEmpty ? "会议" : self.title
         }
         activityChanges = objectWillChange.sink { [weak review = self.review] in review?.objectWillChange.send() }
+        for publisher in [self.windowOCR.objectWillChange,self.windowOCR.reader.objectWillChange,self.windowOCR.live.objectWillChange] {
+            publisher.sink { [weak self] in self?.objectWillChange.send() }.store(in:&ocrActivityChanges)
+        }
         screenChanges = self.screenReader.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         recognition.onAudioStatus = { [weak self] status in self?.audioStatus = status }
         recognition.onText = { [weak self] text in
@@ -118,13 +142,18 @@ func sentenceCount(_ text: String) -> Int {
     }
     func returnToWork(_ destination:MoActivityTarget? = nil) {
         guard !terminationRequested else { return }
-        let target = destination ?? (review.active ? .review : screenReader.visible ? .reader : recording || expanded ? .meeting : nil)
+        let target = destination ?? (review.active ? .review : windowOCR.active || screenReader.visible ? .reader : recording || expanded ? .meeting : nil)
         switch target {
-        case .reader: showMenu = false; expanded = false; screenReader.visible = true
+        case .reader:
+            showMenu = false; expanded = false
+            if windowOCR.active {
+                if let target = windowOCR.target, target.pid > 0 { NSRunningApplication(processIdentifier:target.pid)?.activate() }
+                windowOCR.panels.position(.zero)
+            } else { screenReader.visible = true }
         case .meeting: showMenu = false; expanded = true
         case .review, .chat, .summary, .cleanup:
             review.showActivity(target ?? .review)
-        case nil: toggle()
+        case nil: openLauncher()
         }
     }
     func toggle() {
@@ -148,6 +177,47 @@ func sentenceCount(_ text: String) -> Int {
         else if review.picking { review.panels.showSidebar() }
         else { review.toggleSinglePage() }
     }
+    func openLauncher() {
+        guard !terminationRequested else { return }
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        showMenu = false
+        launcher.reset()
+        launcherPanel.show()
+        Task { await launcher.open(frontPID:pid) }
+    }
+    func endCurrentWork() async -> Bool {
+        if review.active, !(await review.closeForTermination()) { return false }
+        if windowOCR.active, !(await windowOCR.end()) { return false }
+        return true
+    }
+    func endCurrentWorkAction() async {
+        guard !terminationRequested else { return }
+        if (review.active && review.busy) || (windowOCR.active && windowOCR.reader.busy) { notify("正在处理，请稍后结束"); return }
+        if !(await endCurrentWork()) { notify("当前工作保存失败，未结束") }
+    }
+    func launch(_ target: ScreenTarget, _ capability: DuckCapability, note: String) async {
+        guard !terminationRequested, !launching else { return }
+        if (review.active && review.busy) || (windowOCR.active && windowOCR.reader.busy) { notify("正在处理，请稍后再试"); return }
+        launching = true; defer { launching = false }
+        guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
+        guard !terminationRequested else { return }
+        screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
+        let ok = capability == .review ? await attachReview(target,note) : await attachOCR(target,note)
+        if !ok { let text = capability == .review ? review.status : windowOCR.status; if !text.isEmpty { notify(text) } }
+    }
+    func primaryAction() {
+        guard !terminationRequested else { return }
+        if windowOCR.active { if !windowOCR.reader.busy { reframeOCR() } }
+        else if review.active { toggleReviewShortcut() }
+        else { openLauncher() }
+    }
+    func restoreLatestReview() async {
+        guard !terminationRequested else { return }
+        guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
+        await review.restoreLatestStandalone()
+        if !review.active, !review.status.isEmpty { notify(review.status) }
+    }
+    func preserveAttachedWork() -> Bool { windowOCR.preserveForTermination() }
     func readScreen() {
         guard !terminationRequested else { return }
         showMenu = false; expanded = false; screenReader.open()
@@ -155,6 +225,7 @@ func sentenceCount(_ text: String) -> Int {
     func meeting() {
         guard !terminationRequested else { return }
         guard !review.voice.voiceActive, !review.live.active else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
+        guard !windowOCR.live.active else { notify("请先关闭读屏发言，等待对话结束后开始会议"); return }
         guard !busy else { return }
         screenReader.cancel(); screenReader.hide()
         guard !recording else { showMenu = true; return }
@@ -563,8 +634,8 @@ struct MoIslandActivity:View {
                 }.buttonStyle(.plain).help(avatar ? "默默 · 返回当前工作；右键打开功能菜单" : state.description)
                     .contextMenu {
                         Button("会议",action:model.meeting).disabled(model.busy || model.recording)
-                        Button("读屏",action:model.readScreen)
-                        Button("批阅",action:model.startReview)
+                        Button("读屏",action:model.openLauncher)
+                        Button("批阅",action:model.openLauncher)
                         Divider()
                         Button("功能面板",action:model.toggle)
                     }
@@ -615,12 +686,6 @@ struct IslandView: View {
                     Button(action:model.meeting) { MoFeatureIcon(title:"会议",symbol:"waveform") }
                         .buttonStyle(MascotButtonStyle()).disabled(model.busy || model.recording)
                         .help("会议 · 录制系统声音和麦克风").accessibilityLabel("会议")
-                    Button(action:model.readScreen) { MoFeatureIcon(title:"读屏",symbol:"viewfinder") }
-                        .buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
-                        .help("读屏 · 框选识别并保存文字").accessibilityLabel("读屏")
-                    Button(action:model.startReview) { MoFeatureIcon(title:"批阅",symbol:"square.and.pencil") }
-                        .buttonStyle(MascotButtonStyle()).disabled(model.terminationRequested)
-                        .help("批阅 · 截图框选和语音评审").accessibilityLabel("批阅")
                     Spacer(minLength:0)
                 }.padding(.leading,6).padding(.top,8).padding(.bottom,12)
                     .transition(.opacity)
@@ -805,6 +870,12 @@ struct HangingMascot: View {
 final class IslandPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+    // The field editor consumes Delete before SwiftUI's onKeyPress sees it, so the launcher intercepts it here.
+    var keyInterceptor: ((NSEvent) -> Bool)?
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, keyInterceptor?(event) == true { return }
+        super.sendEvent(event)
+    }
 }
 // Carbon global hot keys do not require Accessibility or Input Monitoring permission.
 @MainActor final class ReviewHotKey {
@@ -897,12 +968,13 @@ final class IslandPanel: NSPanel {
         statusItem.button?.image = statusIcon
         statusItem.button?.toolTip = "Mo · 墨"
         let menu = NSMenu()
-        let shortcutAvailable = reviewHotKey.start(action:{ [weak self] in self?.model.toggleReviewShortcut() },detach:{ [weak self] in self?.detachReview() },picker:{ [weak self] in self?.model.showReviewTargets() })
+        let shortcutAvailable = reviewHotKey.start(action:{ [weak self] in self?.model.primaryAction() },detach:{ [weak self] in self?.detachReview() },picker:{ [weak self] in self?.model.openLauncher() })
         model.review.shortcutHint = shortcutAvailable ? "⌥ Enter" : nil
-        menu.addItem(withTitle:shortcutAvailable ? "选择批阅窗口　⌥⇧ Enter" : "选择批阅窗口（快捷键不可用）",action:#selector(showReviewTargets),keyEquivalent:"")
-        let reviewItem = menu.addItem(withTitle:shortcutAvailable ? "切换批阅　⌥ Enter" : "切换批阅（快捷键不可用）",action:#selector(toggleReview),keyEquivalent:"")
+        menu.addItem(withTitle:shortcutAvailable ? "唤起 Mo　⌥⇧ Enter" : "唤起 Mo（快捷键不可用）",action:#selector(openLauncher),keyEquivalent:"")
+        let reviewItem = menu.addItem(withTitle:shortcutAvailable ? "当前工作主操作　⌥ Enter" : "当前工作主操作（快捷键不可用）",action:#selector(primaryAction),keyEquivalent:"")
         if !shortcutAvailable { reviewItem.toolTip = "快捷键注册失败，可能已被其他应用占用；仍可点击菜单或呼吸灯切换。" }
-        menu.addItem(withTitle:shortcutAvailable ? "结束目标窗口批阅　⌥ E" : "结束目标窗口批阅（快捷键不可用）",action:#selector(detachReview),keyEquivalent:"")
+        menu.addItem(withTitle:shortcutAvailable ? "结束当前工作　⌥ E" : "结束当前工作（快捷键不可用）",action:#selector(detachReview),keyEquivalent:"")
+        menu.addItem(withTitle:"恢复最近批阅",action:#selector(restoreReview),keyEquivalent:"")
         menu.addItem(withTitle: "快捷框选取字", action: #selector(quickReadScreen), keyEquivalent: "")
         menu.addItem(withTitle: "显示 Mo · 墨", action: #selector(show), keyEquivalent: "")
         menu.addItem(withTitle: "回到屏幕顶部", action: #selector(reset), keyEquivalent: "")
@@ -934,12 +1006,10 @@ final class IslandPanel: NSPanel {
         if model.review.active { model.review.panels.positionSidebar(.zero) }
     }
     func applicationWillTerminate(_ notification: Notification) { reviewHotKey.stop() }
-    @objc private func showReviewTargets() { model.showReviewTargets() }
-    @objc private func detachReview() {
-        guard !model.terminationRequested, model.review.active, !model.review.busy else { return }
-        model.review.close()
-    }
-    @objc private func toggleReview() { model.toggleReviewShortcut() }
+    @objc private func openLauncher() { model.openLauncher() }
+    @objc private func detachReview() { Task { await model.endCurrentWorkAction() } }
+    @objc private func primaryAction() { model.primaryAction() }
+    @objc private func restoreReview() { Task { await model.restoreLatestReview() } }
     @objc private func quickReadScreen() { model.quickReadScreen() }
     @objc func spaceChanged() { panel.orderFrontRegardless() }
     @objc func screenChanged() { position() }
@@ -972,7 +1042,11 @@ final class IslandPanel: NSPanel {
         model.terminationRequested = true
         Task { @MainActor in
             defer { model.terminationRequested = false }
-            guard model.screenReader.preserveForTermination() else {
+            guard model.screenReader.preserveForTermination(), model.preserveAttachedWork() else {
+                model.notify("读屏修改尚未保存，已取消退出；请重试保存")
+                terminating = false; reply(false); return
+            }
+            if model.windowOCR.active, !(await model.windowOCR.end()) {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return
             }
