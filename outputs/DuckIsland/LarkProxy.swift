@@ -16,6 +16,7 @@ struct LarkMessage: Identifiable, Equatable {
     let text: String
     let time: Date
     let senderID: String
+    let senderIDType: String
     let senderName: String
     let senderType: String
     let msgType: String
@@ -25,6 +26,94 @@ struct LarkMessage: Identifiable, Equatable {
 struct LarkError: LocalizedError, Equatable {
     let message: String
     var errorDescription: String? { message }
+}
+
+// MARK: - Bounded process runner
+
+private final class LarkPipeBuffer: @unchecked Sendable {
+    private let lock = NSLock(); private var data = Data()
+    func append(_ chunk: Data) { lock.lock(); data.append(chunk); lock.unlock() }
+    var value: Data { lock.lock(); defer { lock.unlock() }; return data }
+}
+
+/// Runs a process with a hard timeout. Output is collected through readability handlers (never a blocking read), the
+/// child tree is killed on timeout, and pipes are drained non-blockingly and closed, so a grandchild that keeps a pipe
+/// open cannot hang the caller. Returns nil when the executable cannot be launched.
+func larkRunProcess(executable: String, arguments: [String], timeout: TimeInterval) -> (status: Int32, out: Data, err: Data, timedOut: Bool)? {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: executable)
+    process.arguments = arguments
+    var environment = ProcessInfo.processInfo.environment
+    let extra = ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/node/bin"]
+    environment["PATH"] = (extra + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
+    process.environment = environment
+    let out = Pipe(), err = Pipe()
+    process.standardOutput = out; process.standardError = err; process.standardInput = FileHandle.nullDevice
+    let outBuffer = LarkPipeBuffer(), errBuffer = LarkPipeBuffer()
+    for (pipe, buffer) in [(out, outBuffer), (err, errBuffer)] {
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty { handle.readabilityHandler = nil } else { buffer.append(chunk) }
+        }
+    }
+    let done = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in done.signal() }
+    do { try process.run() } catch {
+        out.fileHandleForReading.readabilityHandler = nil; err.fileHandleForReading.readabilityHandler = nil
+        try? out.fileHandleForReading.close(); try? err.fileHandleForReading.close()
+        return nil
+    }
+    var timedOut = false
+    if done.wait(timeout: .now() + timeout) == .timedOut {
+        timedOut = true
+        let pid = process.processIdentifier
+        let killer = Process()
+        killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        killer.arguments = ["-KILL", "-P", String(pid)]
+        try? killer.run(); killer.waitUntilExit()
+        process.terminate()
+        if done.wait(timeout: .now() + 1) == .timedOut { kill(pid, SIGKILL); _ = done.wait(timeout: .now() + 1) }
+    }
+    for (pipe, buffer) in [(out, outBuffer), (err, errBuffer)] {
+        let handle = pipe.fileHandleForReading
+        handle.readabilityHandler = nil
+        let fd = handle.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        var chunk = [UInt8](repeating: 0, count: 65536)
+        while true { let n = read(fd, &chunk, chunk.count); if n <= 0 { break }; buffer.append(Data(chunk[0..<n])) }
+        try? handle.close()
+    }
+    return (process.isRunning ? -1 : process.terminationStatus, outBuffer.value, errBuffer.value, timedOut)
+}
+
+// MARK: - Reply sanitising
+
+/// Strips constructs that lark-cli would act on (mentions of everyone, remote images, links) and caps the length.
+func larkSanitizeReply(_ text: String) -> String {
+    var result = text
+    let rules: [(String, String)] = [
+        (#"<at\b[^>]*>.*?</at\s*>"#, ""),
+        (#"<at\b[^>]*/?>"#, ""),
+        (#"!\[[^\]]*\]\([^)]*\)"#, ""),
+        (#"https?://[^\s<>)\]]+"#, "（链接已省略）"),
+    ]
+    for (pattern, replacement) in rules {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) else { continue }
+        result = regex.stringByReplacingMatches(in: result, range: NSRange(result.startIndex..., in: result), withTemplate: replacement)
+    }
+    result = result.trimmingCharacters(in: .whitespacesAndNewlines)
+    return result.count > 500 ? String(result.prefix(500)) : result
+}
+
+/// Process-wide count of auto-send attempts per chat (survives chat switches and re-attach).
+@MainActor final class LarkSendLedger {
+    static let shared = LarkSendLedger()
+    private var stamps: [String: [Date]] = [:]
+    func count(chat: String, now: Date, window: TimeInterval = 600) -> Int {
+        stamps[chat] = (stamps[chat] ?? []).filter { now.timeIntervalSince($0) <= window }
+        return stamps[chat]?.count ?? 0
+    }
+    func record(chat: String, now: Date) { stamps[chat, default: []].append(now) }
 }
 
 // MARK: - lark-cli wrapper
@@ -68,40 +157,13 @@ struct LarkCLI {
         })
     }
     private static func runBlocking(executable: String, arguments: [String], timeout: TimeInterval) throws -> Data {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        let extra = ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/node/bin"]
-        environment["PATH"] = (extra + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
-        process.environment = environment
-        let out = Pipe(), err = Pipe()
-        process.standardOutput = out; process.standardError = err; process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { throw LarkError(message: "无法运行 lark-cli，请检查路径") }
-        let timedOut = LockedFlag()
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { if process.isRunning { timedOut.set(); process.terminate() } }
-        let errBox = LockedData()
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global().async { errBox.set(err.fileHandleForReading.readDataToEndOfFile()); group.leave() }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit(); group.wait()
-        if timedOut.value { throw LarkError(message: "lark-cli 响应超时（\(Int(timeout)) 秒）") }
-        guard process.terminationStatus == 0 else {
-            let raw = String(decoding: errBox.value.isEmpty ? data : errBox.value, as: UTF8.self)
+        guard let result = larkRunProcess(executable: executable, arguments: arguments, timeout: timeout) else { throw LarkError(message: "无法运行 lark-cli，请检查路径") }
+        if result.timedOut { throw LarkError(message: "lark-cli 响应超时（\(Int(timeout)) 秒）") }
+        guard result.status == 0 else {
+            let raw = String(decoding: result.err.isEmpty ? result.out : result.err, as: UTF8.self)
             throw LarkError(message: larkFriendlyError(larkErrorText(raw)))
         }
-        return data
-    }
-    private final class LockedFlag: @unchecked Sendable {
-        private let lock = NSLock(); private var flag = false
-        func set() { lock.lock(); flag = true; lock.unlock() }
-        var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
-    }
-    private final class LockedData: @unchecked Sendable {
-        private let lock = NSLock(); private var data = Data()
-        func set(_ value: Data) { lock.lock(); data = value; lock.unlock() }
-        var value: Data { lock.lock(); defer { lock.unlock() }; return data }
+        return result.out
     }
 
     private func object(_ data: Data) throws -> [String: Any] {
@@ -131,10 +193,10 @@ struct LarkCLI {
         }
     }
     func recentChats(limit: Int = 100) async throws -> [LarkChat] {
-        try chats(try await run(["im", "+chat-list", "--as", "user", "--types", "p2p,group", "--sort", "active_time", "--page-size", String(min(max(limit, 1), 100)), "--format", "json"]))
+        try chats(try await run(["im", "+chat-list", "--as", "user", "--types=p2p,group", "--sort=active_time", "--page-size=" + String(min(max(limit, 1), 100)), "--format=json"]))
     }
     func searchChats(_ query: String) async throws -> [LarkChat] {
-        try chats(try await run(["im", "+chat-search", "--as", "user", "--query", query, "--page-size", "20", "--format", "json"]))
+        try chats(try await run(["im", "+chat-search", "--as", "user", "--query=" + query, "--page-size=20", "--format=json"]))
     }
     private func messages(_ data: Data) throws -> (items: [LarkMessage], more: Bool, token: String?) {
         let body = try payload(data)
@@ -144,7 +206,7 @@ struct LarkCLI {
             let sender = item["sender"] as? [String: Any] ?? [:]
             let mentions = (item["mentions"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
             return LarkMessage(id: id, chatID: item["chat_id"] as? String ?? "", text: item["content"] as? String ?? "", time: time,
-                               senderID: sender["id"] as? String ?? "", senderName: sender["name"] as? String ?? "",
+                               senderID: sender["id"] as? String ?? "", senderIDType: sender["id_type"] as? String ?? "", senderName: sender["name"] as? String ?? "",
                                senderType: sender["sender_type"] as? String ?? "", msgType: item["msg_type"] as? String ?? "",
                                mentionIDs: mentions, deleted: item["deleted"] as? Bool ?? false)
         }
@@ -155,8 +217,8 @@ struct LarkCLI {
         var result: [LarkMessage] = []
         var token: String?
         for _ in 0..<4 {
-            var args = ["im", "+chat-messages-list", "--as", "user", "--chat-id", chatID, "--start", larkFormatISO(since), "--order", "asc", "--page-size", "50", "--no-reactions", "--format", "json"]
-            if let token { args += ["--page-token", token] }
+            var args = ["im", "+chat-messages-list", "--as", "user", "--chat-id=" + chatID, "--start=" + larkFormatISO(since), "--order=asc", "--page-size=50", "--no-reactions", "--format=json"]
+            if let token { args.append("--page-token=" + token) }
             let page = try messages(try await run(args))
             result += page.items
             guard page.more, let next = page.token, !next.isEmpty else { break }
@@ -166,11 +228,21 @@ struct LarkCLI {
     }
     /// Latest messages (oldest first) used as reply context.
     func recentMessages(chatID: String, limit: Int = 20) async throws -> [LarkMessage] {
-        let page = try messages(try await run(["im", "+chat-messages-list", "--as", "user", "--chat-id", chatID, "--order", "desc", "--page-size", String(limit), "--no-reactions", "--format", "json"]))
+        let page = try messages(try await run(["im", "+chat-messages-list", "--as", "user", "--chat-id=" + chatID, "--order=desc", "--page-size=" + String(limit), "--no-reactions", "--format=json"]))
         return Array(page.items.reversed())
     }
-    func reply(messageID: String, markdown: String, idempotencyKey: String) async throws {
-        _ = try object(try await run(["im", "+messages-reply", "--as", "user", "--message-id", messageID, "--markdown", markdown, "--idempotency-key", idempotencyKey]))
+    /// Sends with `--text=` (never --markdown: lark-cli would fetch remote images and parse <at>). Returns the new message id if reported.
+    @discardableResult
+    func reply(messageID: String, text: String, idempotencyKey: String) async throws -> String? {
+        let root = try object(try await run(["im", "+messages-reply", "--as", "user", "--message-id=" + messageID, "--text=" + text, "--idempotency-key=" + idempotencyKey, "--format=json"]))
+        func find(_ value: Any?) -> String? {
+            if let dict = value as? [String: Any] {
+                if let id = dict["message_id"] as? String { return id }
+                for child in dict.values { if let id = find(child) { return id } }
+            }
+            return nil
+        }
+        return find(root["data"])
     }
 }
 
@@ -208,10 +280,12 @@ func larkMatchChat(ocrLines: [String], chats: [LarkChat]) -> LarkChatMatch {
     return unique.count == 1 ? .matched(unique[0]) : .ambiguous(unique)
 }
 
-/// OCR of the window's upper band (conversation title area), one string per line.
+let larkOCRRegion = CGRect(x: 0.3, y: 0, width: 0.7, height: 0.14)
+
+/// OCR of the right-hand conversation header band (x 0.3-1.0, top 14%), one string per line.
 func larkDetectChatLines(_ target: ScreenTarget) async throws -> [String] {
     let (png, _) = try await captureScreenWindow(target, purpose: .ocr)
-    let result = try recognizeScreenRegion(png: png, region: CGRect(x: 0, y: 0, width: 1, height: 0.14))
+    let result = try recognizeScreenRegion(png: png, region: larkOCRRegion)
     return result.text.split(separator: "\n").map(String.init)
 }
 
@@ -230,10 +304,12 @@ func larkReplyContext(chat: LarkChat, me: String, history: [LarkMessage], target
 // MARK: - Session
 
 enum LarkReplyState: Equatable {
-    case recorded, generating, draft, sending, sentAuto, sentManual, failed(String), discarded
+    case recorded, recordedEarly, generating, draft, sending, sentAuto, sentManual, failed(String), discarded, skipped(String)
     var label: String {
         switch self {
         case .recorded: return "仅记录"
+        case .recordedEarly: return "仅记录（attach 当分钟内的消息不自动回复）"
+        case .skipped(let reason): return reason
         case .generating: return "生成回复中…"
         case .draft: return "草稿待发"
         case .sending: return "发送中…"
@@ -302,13 +378,16 @@ struct LarkProxyRecord: Identifiable, Equatable {
     var maxReplies: () -> Int = { LarkProxySettings.maxRepliesPer10Min }
     var pollInterval: () -> TimeInterval = { LarkProxySettings.pollInterval }
     var autoStart = true
+    var ledger = LarkSendLedger.shared
+    /// Auto-send stays off until the user confirms an auto-detected conversation (manual picker selection confirms).
+    @Published var confirmed = false
 
     private var cli: LarkCLI?
     private var me = ""
     private var baseline = Date.distantFuture
     private var cursor = Date.distantFuture
     private var seen = Set<String>()
-    private var autoSent: [Date] = []
+    private var ownSent = Set<String>()
     private var token = UUID()
     private var trackFailures = 0
     private var tracking: Timer?
@@ -353,7 +432,7 @@ struct LarkProxyRecord: Identifiable, Equatable {
         let lines = (try? await detectLines(target)) ?? []
         guard current == token, chat == nil else { return }
         switch larkMatchChat(ocrLines: lines, chats: chats) {
-        case .matched(let found): select(found)
+        case .matched(let found): select(found, confirmed: false)
         case .ambiguous(let options): chats = options + chats.filter { c in !options.contains(where: { $0.id == c.id }) }; needsPicker = true; status = "请选择会话"
         case .none: needsPicker = true; status = "没有识别到会话，请选择会话"
         }
@@ -376,12 +455,12 @@ struct LarkProxyRecord: Identifiable, Equatable {
     }
 
     /// Starts watching a conversation. Only messages after this moment are handled; history is never answered.
-    func select(_ item: LarkChat) {
+    func select(_ item: LarkChat, confirmed confirm: Bool = true) {
         guard active else { return }
         token = UUID()
         pollTask?.cancel(); pollTask = nil
         chat = item; needsPicker = false; searchResults = []
-        records = []; seen = []; autoSent = []; generating = false
+        records = []; seen = []; ownSent = []; generating = false; confirmed = confirm
         baseline = larkFloorMinute(now()); cursor = baseline
         status = "已选择会话，等待新消息"
         guard autoStart else { return }
@@ -394,6 +473,7 @@ struct LarkProxyRecord: Identifiable, Equatable {
         }
     }
 
+    func confirmChat() { if chat != nil { confirmed = true } }
     func pollNow() { Task { await pollOnce() } }
 
     func pollOnce() async {
@@ -414,32 +494,49 @@ struct LarkProxyRecord: Identifiable, Equatable {
     }
 
     private func ingest(_ fetched: [LarkMessage], chat: LarkChat, cli: LarkCLI, token current: UUID) async {
+        var qualifying: [LarkMessage] = []
         for item in fetched.sorted(by: { $0.time < $1.time }) {
-            guard current == token else { return }
             guard seen.insert(item.id).inserted else { continue }
             cursor = max(cursor, item.time)
-            guard item.time > baseline, !item.deleted, item.msgType != "system", item.senderID != me else { continue }
-            let name = item.senderName.isEmpty ? "对方" : item.senderName
-            let qualifies = item.senderType == "user" && ["text", "post"].contains(item.msgType) && (chat.isP2P || item.mentionIDs.contains(me))
-            let record = LarkProxyRecord(id: item.id, sender: name, time: item.time, text: item.text, state: qualifies ? .generating : .recorded)
-            records.append(record)
+            guard item.time >= baseline, !item.deleted, item.msgType != "system", item.senderID != me, !ownSent.contains(item.id) else { continue }
+            let early = item.time <= baseline   // sent within the attach minute: cannot tell whether it predates attach
+            let qualifies = !early && item.senderIDType == "open_id" && item.senderType == "user" && ["text", "post"].contains(item.msgType) && (chat.isP2P || item.mentionIDs.contains(me))
+            records.append(LarkProxyRecord(id: item.id, sender: item.senderName.isEmpty ? "对方" : item.senderName, time: item.time, text: item.text, state: qualifies ? .generating : (early ? .recordedEarly : .recorded)))
             if records.count > 100 { records.removeFirst(records.count - 100) }
-            guard qualifies else { continue }
-            generating = true
-            defer { generating = false }
-            let history = (try? await cli.recentMessages(chatID: chat.id)) ?? []
-            guard current == token else { return }
-            let text: String
-            do { text = try await generate(larkReplyContext(chat: chat, me: me, history: history, target: item)) } catch {
-                guard current == token else { return }
-                update(item.id) { $0.state = .failed("生成回复失败：" + message(error)) }
-                continue
-            }
-            guard current == token else { return }
-            update(item.id) { $0.draft = text; $0.state = .draft }
-            autoSent.removeAll { now().timeIntervalSince($0) > 600 }
-            if autoReplyOn, autoSent.count < maxReplies() { await send(item.id, auto: true) }
+            if qualifies { qualifying.append(item) }
         }
+        // One reply per sender per poll: only the latest qualifying message is answered.
+        var latest: [String: String] = [:]
+        for item in qualifying { latest[item.senderID] = item.id }
+        for item in qualifying where latest[item.senderID] != item.id { update(item.id) { $0.state = .skipped("已合并") } }
+        for item in qualifying where latest[item.senderID] == item.id {
+            guard current == token else { return }
+            await respond(to: item, chat: chat, cli: cli, token: current)
+        }
+    }
+
+    private func respond(to item: LarkMessage, chat: LarkChat, cli: LarkCLI, token current: UUID) async {
+        generating = true
+        defer { generating = false }
+        let history = (try? await cli.recentMessages(chatID: chat.id)) ?? []
+        guard current == token else { return }
+        let text: String
+        do { text = larkSanitizeReply(try await generate(larkReplyContext(chat: chat, me: me, history: history, target: item))) } catch {
+            guard current == token else { return }
+            update(item.id) { $0.state = .failed("生成回复失败：" + message(error)) }
+            return
+        }
+        guard current == token else { return }
+        update(item.id) { $0.draft = text; $0.state = .draft }
+        // Auto-send gates: setting/pause, user confirmation, freshness, per-chat rate limit, and nobody replied meanwhile.
+        guard autoReplyOn, confirmed, !text.isEmpty, now().timeIntervalSince(item.time) <= 300,
+              ledger.count(chat: chat.id, now: now()) < maxReplies() else { return }
+        guard let latestHistory = try? await cli.recentMessages(chatID: chat.id), current == token else { return }
+        if latestHistory.contains(where: { $0.senderID == me && $0.id != item.id && !ownSent.contains($0.id) && $0.time >= item.time }) {
+            update(item.id) { $0.state = .skipped("你已回复，跳过"); $0.draft = "" }
+            return
+        }
+        await send(item.id, auto: true)
     }
 
     private func update(_ id: String, _ change: (inout LarkProxyRecord) -> Void) {
@@ -450,16 +547,17 @@ struct LarkProxyRecord: Identifiable, Equatable {
 
     /// Sends the (possibly edited) draft as a reply. Failed records can be retried; the idempotency key prevents duplicates.
     func send(_ id: String, auto: Bool = false) async {
-        guard let cli, let record = records.first(where: { $0.id == id }), record.state == .draft || record.state.isFailed else { return }
-        let text = record.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let cli, let chat, let record = records.first(where: { $0.id == id }), record.state == .draft || record.state.isFailed else { return }
+        let text = larkSanitizeReply(record.draft)
         guard !text.isEmpty else { update(id) { $0.state = .failed("回复为空，无法发送") }; return }
         let current = token
-        update(id) { $0.state = .sending }
+        update(id) { $0.state = .sending; $0.draft = text }
+        if auto { ledger.record(chat: chat.id, now: now()) }   // every automatic attempt counts, success or not
         do {
-            try await cli.reply(messageID: id, markdown: text, idempotencyKey: larkIdempotencyKey(id))
+            let sent = try await cli.reply(messageID: id, text: text, idempotencyKey: larkIdempotencyKey(id))
+            if let sent { ownSent.insert(sent) }
             guard current == token else { return }
             update(id) { $0.state = auto ? .sentAuto : .sentManual }
-            if auto { autoSent.append(now()) }
         } catch {
             guard current == token else { return }
             update(id) { $0.state = .failed("发送失败：" + message(error)) }
@@ -495,7 +593,7 @@ struct LarkProxyRecord: Identifiable, Equatable {
         pollTask?.cancel(); pollTask = nil
         panels.close()
         active = false; target = nil; chat = nil; needsPicker = false; chats = []; searchResults = []; records = []
-        status = ""; lastPoll = nil; paused = false; generating = false; cli = nil; seen = []; autoSent = []
+        status = ""; lastPoll = nil; paused = false; generating = false; cli = nil; seen = []; ownSent = []; confirmed = false
         return true
     }
 }
@@ -588,7 +686,7 @@ struct LarkProxyRecordView: View {
         case .sentAuto, .sentManual: return Color.green
         case .draft, .generating, .sending: return Color.orange
         case .failed: return Color.red
-        case .recorded, .discarded: return IslandStyle.secondary
+        case .recorded, .recordedEarly, .discarded, .skipped: return IslandStyle.secondary
         }
     }
     var body: some View {
@@ -601,6 +699,10 @@ struct LarkProxyRecordView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2).background(Color.white.opacity(0.1), in: Capsule())
             }
             Divider().overlay(IslandStyle.line)
+            if let chat = session.chat, !session.confirmed, !session.needsPicker {
+                Button("确认代发 · " + chat.name) { session.confirmChat() }.buttonStyle(PrimaryActionStyle())
+                Text("确认前，新回复只存为草稿，不会自动发送。").font(.system(size: 10)).foregroundStyle(IslandStyle.secondary)
+            }
             if session.needsPicker || session.chat == nil { LarkChatPicker(session: session) }
             else if session.records.isEmpty {
                 Text("等待新消息…").font(.system(size: 11)).foregroundStyle(IslandStyle.secondary).frame(maxWidth: .infinity, alignment: .leading)

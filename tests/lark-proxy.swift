@@ -9,28 +9,33 @@ final class FakeLark: @unchecked Sendable {
     private var _calls: [[String]] = []
     private var _messages: [[String: Any]] = []
     private var _error: String?
+    private var _replyError: String?
+    private var _sentCount = 0
+    private var _onList: (() -> Void)?
     var calls: [[String]] { lock.lock(); defer { lock.unlock() }; return _calls }
     var replies: [[String]] { calls.filter { $0.count > 1 && $0[1] == "+messages-reply" } }
     func setMessages(_ value: [[String: Any]]) { lock.lock(); _messages = value; lock.unlock() }
     func setError(_ value: String?) { lock.lock(); _error = value; lock.unlock() }
+    func setReplyError(_ value: String?) { lock.lock(); _replyError = value; lock.unlock() }
     static let me = "ou_me"
     static func json(_ object: Any) -> Data { try! JSONSerialization.data(withJSONObject: object) }
-    static func msg(_ id: String, _ text: String, at time: String, from sender: String = "ou_other", type: String = "user", mentions: [String] = [], kind: String = "text") -> [String: Any] {
+    static func msg(_ id: String, _ text: String, at time: String, from sender: String = "ou_other", type: String = "user", idType: String = "open_id", mentions: [String] = [], kind: String = "text") -> [String: Any] {
         var m: [String: Any] = ["message_id": id, "chat_id": "oc_chat", "content": text, "create_time": time, "deleted": false, "msg_type": kind,
-                                "sender": ["id": sender, "id_type": "open_id", "name": sender == me ? "我" : "小李", "sender_type": type]]
+                                "sender": ["id": sender, "id_type": idType, "name": sender == me ? "我" : "小李", "sender_type": type]]
         if !mentions.isEmpty { m["mentions"] = mentions.enumerated().map { ["id": $1, "key": "@_user_\($0 + 1)", "name": "x"] } }
         return m
     }
     var cli: LarkCLI {
         LarkCLI(run: { [self] args in
-            lock.lock(); _calls.append(args); let error = _error; let messages = _messages; lock.unlock()
+            lock.lock(); _calls.append(args); let error = _error; let replyError = _replyError; let messages = _messages; _sentCount += args.count > 1 && args[1] == "+messages-reply" ? 1 : 0; let sentN = _sentCount; lock.unlock()
             if args[0] == "auth" { return Self.json(["identity": "user", "brand": "lark", "identities": ["user": ["available": true, "tokenStatus": "valid", "openId": Self.me, "userName": "Me"]]]) }
+            if let replyError, args.count > 1, args[1] == "+messages-reply" { throw LarkError(message: replyError) }
             if let error { throw LarkError(message: error) }
             switch args[1] {
             case "+chat-list": return Self.json(["ok": true, "data": ["chats": [["chat_id": "oc_chat", "chat_mode": "p2p", "name": "小李"], ["chat_id": "oc_group", "chat_mode": "group", "name": "Mo 项目群"], ["chat_id": "oc_g2", "chat_mode": "group", "name": "Mo 设计群"]], "has_more": false]])
             case "+chat-search": return Self.json(["ok": true, "data": ["chats": [["chat_id": "oc_s", "chat_mode": "DEFAULT", "name": "搜索结果"]]]])
             case "+chat-messages-list": return Self.json(["ok": true, "data": ["messages": messages, "has_more": false]])
-            case "+messages-reply": return Self.json(["ok": true, "data": ["message_id": "om_sent"]])
+            case "+messages-reply": return Self.json(["ok": true, "data": ["message_id": "om_sent_\(sentN)"]])
             default: throw LarkError(message: "unexpected \(args)")
             }
         })
@@ -67,13 +72,14 @@ Task { @MainActor in
     // --- helpers ---
     var generated: [String] = []
     var generatorFails = false
-    @MainActor func makeSession(_ fake: FakeLark, chat: LarkChat? = nil, auto: Bool = true, max: Int = 3, lines: [String] = []) async -> LarkProxySession {
+    @MainActor func makeSession(_ fake: FakeLark, chat: LarkChat? = nil, auto: Bool = true, max: Int = 3, lines: [String] = [], ledger: LarkSendLedger? = nil, now: Date? = nil) async -> LarkProxySession {
         let s = LarkProxySession()
         s.autoStart = false
         s.makeCLI = { fake.cli }
         s.resolveFrame = { _ in CGRect(x: 100, y: 100, width: 900, height: 620) }
         s.detectLines = { _ in lines }
-        s.now = { attachTime }
+        s.now = { now ?? attachTime }
+        s.ledger = ledger ?? LarkSendLedger()
         s.autoReplyEnabled = { auto }
         s.maxReplies = { max }
         s.generate = { context in
@@ -93,7 +99,7 @@ Task { @MainActor in
         let fake = FakeLark()
         let s = await makeSession(fake, lines: ["Lark", "Mo 项目群"])
         await s.detectChat()
-        precondition(s.chat == group && !s.needsPicker && s.chats.count == 3, "detected")
+        precondition(s.chat == group && !s.needsPicker && s.chats.count == 3 && !s.confirmed, "detected, unconfirmed")
         let s2 = await makeSession(fake, lines: ["Mo 项目群", "Mo 设计群"])
         await s2.detectChat()
         precondition(s2.chat == nil && s2.needsPicker, "ambiguous -> picker")
@@ -102,7 +108,7 @@ Task { @MainActor in
         precondition(s3.chat == nil && s3.needsPicker && !s3.status.isEmpty)
         await s3.search("搜")
         precondition(s3.searchResults.map(\.name) == ["搜索结果"] && s3.visibleChats.first?.id == "oc_s")
-        s3.select(s3.searchResults[0]); precondition(s3.chat?.id == "oc_s" && !s3.needsPicker)
+        s3.select(s3.searchResults[0]); precondition(s3.chat?.id == "oc_s" && !s3.needsPicker && s3.confirmed, "manual pick confirms")
         for x in [s, s2, s3] { _ = await x.end() }
     }
 
@@ -110,17 +116,17 @@ Task { @MainActor in
     do {
         let fake = FakeLark(); generated = []
         let s = await makeSession(fake, chat: p2p)
-        fake.setMessages([history, F.msg("om_own", "我自己说的", at: "2026-11-06 08:31", from: F.me), F.msg("om_1", "晚上吃饭吗", at: "2026-11-06 08:31")])
+        fake.setMessages([history, F.msg("om_own", "我自己说的", at: "2026-11-06 08:30", from: F.me), F.msg("om_1", "晚上吃饭吗", at: "2026-11-06 08:31")])
         await s.pollOnce()
         precondition(s.records.map(\.id) == ["om_1"], "history and own messages never recorded: \(s.records.map(\.id))")
         precondition(s.records[0].state == .sentAuto && s.records[0].draft == "好的，收到", "\(s.records[0].state)")
-        precondition(fake.replies == [["im", "+messages-reply", "--as", "user", "--message-id", "om_1", "--markdown", "好的，收到", "--idempotency-key", "mo-om_1"]], "\(fake.replies)")
+        precondition(fake.replies == [["im", "+messages-reply", "--as", "user", "--message-id=om_1", "--text=好的，收到", "--idempotency-key=mo-om_1", "--format=json"]], "\(fake.replies)")
         precondition(generated.count == 1 && generated[0].contains("晚上吃饭吗") && generated[0].contains("messageToReply"))
         precondition(s.lastPoll != nil && s.status.isEmpty)
         await s.pollOnce(); await s.pollOnce()
         precondition(fake.replies.count == 1 && s.records.count == 1, "dedupe by message_id")
-        let listCall = fake.calls.first { $0.count > 1 && $0[1] == "+chat-messages-list" && $0.contains("--start") }!
-        precondition(listCall.contains("--as") && listCall.contains("user") && listCall.contains("oc_chat"))
+        let listCall = fake.calls.first { $0.count > 1 && $0[1] == "+chat-messages-list" && $0.contains { $0.hasPrefix("--start=") } }!
+        precondition(listCall.contains("--as") && listCall.contains("user") && listCall.contains("--chat-id=oc_chat") && listCall.contains { $0.hasPrefix("--start=") })
         precondition(!fake.calls.contains { $0.contains("--yolo") })
         _ = await s.end()
         precondition(!s.active && s.panels.toolbar == nil)
@@ -135,7 +141,7 @@ Task { @MainActor in
         await s.pollOnce()
         let states = Dictionary(uniqueKeysWithValues: s.records.map { ($0.id, $0.state) })
         precondition(states["om_g1"] == .recorded && states["om_g2"] == .sentAuto && states["om_g3"] == .recorded && states["om_g4"] == .recorded && states["om_sys"] == nil, "\(states)")
-        precondition(fake.replies.count == 1 && fake.replies[0].contains("om_g2"))
+        precondition(fake.replies.count == 1 && fake.replies[0].contains("--message-id=om_g2"))
         _ = await s.end()
     }
 
@@ -143,12 +149,12 @@ Task { @MainActor in
     do {
         let fake = FakeLark()
         let s = await makeSession(fake, chat: p2p, auto: false)
-        fake.setMessages([F.msg("om_d1", "有空吗", at: "2026-11-06 08:31"), F.msg("om_d2", "在吗", at: "2026-11-06 08:31")])
+        fake.setMessages([F.msg("om_d1", "有空吗", at: "2026-11-06 08:31", from: "ou_d1"), F.msg("om_d2", "在吗", at: "2026-11-06 08:31", from: "ou_d2")])
         await s.pollOnce()
         precondition(s.records.allSatisfy { $0.state == .draft } && fake.replies.isEmpty)
         s.setDraft("om_d1", "有空，几点？")
         await s.send("om_d1")
-        precondition(fake.replies.count == 1 && fake.replies[0] == ["im", "+messages-reply", "--as", "user", "--message-id", "om_d1", "--markdown", "有空，几点？", "--idempotency-key", "mo-om_d1"])
+        precondition(fake.replies.count == 1 && fake.replies[0] == ["im", "+messages-reply", "--as", "user", "--message-id=om_d1", "--text=有空，几点？", "--idempotency-key=mo-om_d1", "--format=json"])
         precondition(s.records.first { $0.id == "om_d1" }?.state == .sentManual)
         await s.send("om_d1"); precondition(fake.replies.count == 1, "no double send")
         s.discard("om_d2"); await s.send("om_d2")
@@ -168,7 +174,7 @@ Task { @MainActor in
     do {
         let fake = FakeLark()
         let s = await makeSession(fake, chat: p2p, max: 3)
-        fake.setMessages((1...4).map { F.msg("om_r\($0)", "问题\($0)", at: "2026-11-06 08:3\($0)") })
+        fake.setMessages((1...4).map { F.msg("om_r\($0)", "问题\($0)", at: "2026-11-06 08:3\($0)", from: "ou_r\($0)") })
         await s.pollOnce()
         precondition(s.records.map(\.state) == [.sentAuto, .sentAuto, .sentAuto, .draft], "\(s.records.map(\.state))")
         precondition(fake.replies.count == 3)
@@ -212,14 +218,153 @@ Task { @MainActor in
     }
     precondition(larkIdempotencyKey(String(repeating: "x", count: 80)).count == 50 && larkIdempotencyKey("om_1") == "mo-om_1")
 
+    // --- C1/I4 sanitize + argv injection ---
+    precondition(larkSanitizeReply("好的 <at user_id=\"all\">所有人</at> 收到<at user_id=\"x\"/>") == "好的  收到")
+    precondition(larkSanitizeReply("看图 ![x](https://evil.test/a.png) 好") == "看图  好")
+    precondition(larkSanitizeReply("见 https://example.com/a?b=1 和 http://x.y") == "见 （链接已省略） 和 （链接已省略）")
+    precondition(larkSanitizeReply(String(repeating: "字", count: 800)).count == 500)
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        s.generate = { _ in "--as bot <at user_id=\"all\">x</at> 见 https://evil.test ![i](http://a/b.png)" }
+        fake.setMessages([F.msg("om_i1", "hi", at: "2026-11-06 08:31")])
+        await s.pollOnce()
+        let call = fake.replies[0]
+        precondition(call.filter { $0.hasPrefix("--text=") } == ["--text=--as bot  见 （链接已省略）"], "\(call)")
+        precondition(!call.contains("--markdown") && !call.contains { $0.hasPrefix("--markdown") } && call.filter({ $0 == "--as" }).count == 1 && call.contains("--message-id=om_i1"))
+        precondition(call.allSatisfy { !$0.hasPrefix("-") || $0.hasPrefix("--as") || $0.contains("=") || $0 == "--no-reactions" })
+        let list = fake.calls.first { $0.contains("+chat-messages-list") }!
+        precondition(list.contains("--chat-id=oc_chat") && list.contains("--format=json"))
+        _ = await s.end()
+        let q = FakeLark(); let s2 = await makeSession(q, lines: ["x"])
+        await s2.search("--as bot"); precondition(q.calls.last!.contains("--query=--as bot"))
+        _ = await s2.end()
+    }
+
+    // --- C2: merge, stale, already replied ---
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        fake.setMessages([F.msg("om_m1", "在吗", at: "2026-11-06 08:31"), F.msg("om_m2", "有个事", at: "2026-11-06 08:31"), F.msg("om_m3", "帮忙看下", at: "2026-11-06 08:32", from: "ou_other2")])
+        await s.pollOnce()
+        let st = Dictionary(uniqueKeysWithValues: s.records.map { ($0.id, $0.state) })
+        precondition(st["om_m1"] == .skipped("已合并") && st["om_m2"] == .sentAuto && st["om_m3"] == .sentAuto && fake.replies.count == 2, "\(st)")
+        precondition(st["om_m1"]!.label == "已合并")
+        _ = await s.end()
+        // older than 5 minutes at send time -> draft only
+        let f2 = FakeLark()
+        let s2 = await makeSession(f2, chat: p2p, now: formatter.date(from: "2026-11-06 08:40:00"))
+        s2.select(p2p)
+        let later = s2.now
+        s2.now = { formatter.date(from: "2026-11-06 08:30:40")! }
+        s2.select(p2p); s2.now = later
+        f2.setMessages([F.msg("om_o1", "旧消息", at: "2026-11-06 08:32")])
+        await s2.pollOnce()
+        precondition(s2.records[0].state == .draft && f2.replies.isEmpty, "\(s2.records[0].state)")
+        _ = await s2.end()
+        // I'm already replied (seen on the re-fetch right before sending, while the generator was slow)
+        let f3 = FakeLark()
+        let s3 = await makeSession(f3, chat: p2p)
+        s3.generate = { _ in
+            f3.setMessages([F.msg("om_q1", "吃了吗", at: "2026-11-06 08:31"), F.msg("om_mine", "我自己回了", at: "2026-11-06 08:32", from: F.me)])
+            return "吃了"
+        }
+        f3.setMessages([F.msg("om_q1", "吃了吗", at: "2026-11-06 08:31")])
+        await s3.pollOnce()
+        precondition(s3.records[0].state == .skipped("你已回复，跳过") && f3.replies.isEmpty && s3.records[0].state.label == "你已回复，跳过", "\(s3.records[0].state)")
+        // an own reply that happened BEFORE the target does not block
+        f3.setMessages([F.msg("om_old_mine", "之前", at: "2026-11-06 08:30", from: F.me), F.msg("om_q2", "在吗", at: "2026-11-06 08:34")])
+        s3.generate = { _ in "在" }
+        await s3.pollOnce()
+        precondition(s3.records.last?.id == "om_q2" && s3.records.last?.state == .sentAuto, "\(s3.records.map { ($0.id, $0.state) }) \(s3.status)")
+        _ = await s3.end()
+    }
+
+    // --- I3: attach-minute messages are shown but never auto-sent ---
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        fake.setMessages([F.msg("om_early", "刚好在 attach 那分钟", at: "2026-11-06 08:30")])
+        await s.pollOnce()
+        precondition(s.records.count == 1 && s.records[0].state == .recordedEarly && fake.replies.isEmpty)
+        precondition(s.records[0].state.label == "仅记录（attach 当分钟内的消息不自动回复）")
+        _ = await s.end()
+    }
+
+    // --- I5: id_type / own-sent ids ---
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, chat: p2p)
+        fake.setMessages([F.msg("om_a1", "来自非 open_id 的发送者", at: "2026-11-06 08:31", from: "cli_app", idType: "app_id"), F.msg("om_a2", "你好", at: "2026-11-06 08:31", from: "ou_y")])
+        await s.pollOnce()
+        precondition(s.records.first { $0.id == "om_a1" }?.state == .recorded && s.records.first { $0.id == "om_a2" }?.state == .sentAuto)
+        // our own reply comes back later attributed to someone else: ignored via returned message_id
+        fake.setMessages([F.msg("om_sent_1", "好的，收到", at: "2026-11-06 08:32", from: "ou_unknown")])
+        await s.pollOnce()
+        precondition(s.records.allSatisfy { $0.id != "om_sent_1" } && fake.replies.count == 1)
+        _ = await s.end()
+    }
+
+    // --- I6: process-wide per-chat ledger; failures count; survives switching ---
+    do {
+        let fake = FakeLark(); let ledger = LarkSendLedger()
+        let s = await makeSession(fake, chat: p2p, max: 3, ledger: ledger)
+        fake.setReplyError("lark-cli 响应超时（30 秒）")
+        fake.setMessages([F.msg("om_l1", "1", at: "2026-11-06 08:31", from: "ou_1")])
+        await s.pollOnce()
+        precondition(s.records[0].state.isFailed && ledger.count(chat: "oc_chat", now: attachTime) == 1, "failed attempt counts")
+        fake.setReplyError(nil)
+        fake.setMessages([F.msg("om_l2", "2", at: "2026-11-06 08:32", from: "ou_2"), F.msg("om_l3", "3", at: "2026-11-06 08:32", from: "ou_3")])
+        await s.pollOnce()
+        precondition(ledger.count(chat: "oc_chat", now: attachTime) == 3)
+        s.select(group); s.select(p2p)   // switch away and back
+        fake.setMessages([F.msg("om_l4", "4", at: "2026-11-06 08:33", from: "ou_4")])
+        await s.pollOnce()
+        precondition(s.records.first { $0.id == "om_l4" }?.state == .draft, "limit survives chat switch")
+        _ = await s.end()
+        // re-attach with the same ledger
+        let again = await makeSession(fake, chat: p2p, max: 3, ledger: ledger)
+        fake.setMessages([F.msg("om_l5", "5", at: "2026-11-06 08:33", from: "ou_5")])
+        await again.pollOnce()
+        precondition(again.records[0].state == .draft && ledger.count(chat: "oc_group", now: attachTime) == 0, "limit survives re-attach, other chats unaffected")
+        _ = await again.end()
+    }
+
+    // --- I7: unconfirmed auto-detected chat only drafts; OCR band ---
+    precondition(larkOCRRegion == CGRect(x: 0.3, y: 0, width: 0.7, height: 0.14))
+    do {
+        let fake = FakeLark()
+        let s = await makeSession(fake, lines: ["小李 · 在线"])
+        await s.detectChat()
+        precondition(s.chat == p2p && !s.confirmed)
+        fake.setMessages([F.msg("om_c1", "在吗", at: "2026-11-06 08:31")])
+        await s.pollOnce()
+        precondition(s.records[0].state == .draft && fake.replies.isEmpty)
+        s.confirmChat()
+        fake.setMessages([F.msg("om_c2", "还在吗", at: "2026-11-06 08:32")])
+        await s.pollOnce()
+        precondition(s.records.last?.state == .sentAuto && fake.replies.count == 1)
+        _ = await s.end()
+    }
+
+    // --- process runner: timeout kills the child tree and cannot hang ---
+    do {
+        let start = Date()
+        let r = larkRunProcess(executable: "/bin/sh", arguments: ["-c", "sleep 30 & sleep 30"], timeout: 1)
+        precondition(r != nil && r!.timedOut && Date().timeIntervalSince(start) < 6, "timeout returns promptly")
+        let ok = larkRunProcess(executable: "/bin/sh", arguments: ["-c", "echo out; echo err 1>&2"], timeout: 5)!
+        precondition(ok.status == 0 && String(decoding: ok.out, as: UTF8.self) == "out\n" && String(decoding: ok.err, as: UTF8.self) == "err\n" && !ok.timedOut)
+        precondition(larkRunProcess(executable: "/nonexistent/x", arguments: [], timeout: 1) == nil)
+    }
+
     // --- render ---
     do {
         let fake = FakeLark(); generatorFails = false
         let s = await makeSession(fake, chat: group, auto: true, max: 1)
         s.makeCLI = { fake.cli }
-        fake.setMessages([F.msg("om_v1", "周五的评审改到下午三点了，大家注意一下时间", at: "2026-11-06 08:31"),
-                          F.msg("om_v2", "@我 方案文档看了吗？有几处想确认", at: "2026-11-06 08:32", mentions: [F.me]),
-                          F.msg("om_v3", "@我 上线窗口能不能提前", at: "2026-11-06 08:33", mentions: [F.me])])
+        fake.setMessages([F.msg("om_v1", "周五的评审改到下午三点了，大家注意一下时间", at: "2026-11-06 08:31", from: "ou_c"),
+                          F.msg("om_v2", "@我 方案文档看了吗？有几处想确认", at: "2026-11-06 08:32", from: "ou_a", mentions: [F.me]),
+                          F.msg("om_v3", "@我 上线窗口能不能提前", at: "2026-11-06 08:33", from: "ou_b", mentions: [F.me])])
         await s.pollOnce()
         precondition(s.records.map(\.state) == [.recorded, .sentAuto, .draft], "\(s.records.map(\.state))")
         s.lastPoll = attachTime
@@ -245,6 +390,10 @@ Task { @MainActor in
         await picking.detectChat()
         try render("lark-picker", size: preview, LarkProxyRecordView(session: picking))
         _ = await picking.end()
+        let unconfirmed = await makeSession(fake, lines: ["Mo 项目群"])
+        await unconfirmed.detectChat(); precondition(!unconfirmed.confirmed)
+        try render("lark-unconfirmed", size: preview, LarkProxyRecordView(session: unconfirmed))
+        _ = await unconfirmed.end()
         // orb click polls once more
         let before = fake.calls.count
         let down = NSEvent.mouseEvent(with: .leftMouseDown, location: CGPoint(x: 64, y: 40), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: toolbar.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)!

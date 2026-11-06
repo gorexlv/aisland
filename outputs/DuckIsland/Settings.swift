@@ -64,7 +64,7 @@ struct LarkAuthStatus: Equatable {
         let user = (root["identities"] as? [String: Any])?["user"] as? [String: Any]
         let available = user?["available"] as? Bool ?? false
         let token = user?["tokenStatus"] as? String ?? ""
-        let valid = available && (token.isEmpty || token == "valid")
+        let valid = available && (token.isEmpty || token == "valid" || token == "needs_refresh")
         let name = user?["userName"] as? String ?? ""
         let message = valid ? "已登录" : (token == "expired" ? "登录已过期，请在终端执行 lark-cli auth login" : "未登录，请在终端执行 lark-cli auth login")
         return LarkAuthStatus(loggedIn: valid, identity: identity, brand: brand, userName: name, message: message)
@@ -96,21 +96,8 @@ typealias LarkProbeRunner = (_ executable: String, _ arguments: [String]) -> (st
 enum LarkAuthProbe {
     /// Real runner: blocking, 10s timeout. Only used with the read-only `auth status` command.
     static let processRunner: LarkProbeRunner = { executable, arguments in
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        let extra = ["/opt/homebrew/bin", "/usr/local/bin", NSHomeDirectory() + "/.local/node/bin"]
-        environment["PATH"] = (extra + [environment["PATH"] ?? "/usr/bin:/bin"]).joined(separator: ":")
-        process.environment = environment
-        let pipe = Pipe()
-        process.standardOutput = pipe; process.standardError = Pipe(); process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return (-1, Data()) }
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { if process.isRunning { process.terminate() }; done.signal() }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        return (process.terminationStatus, data)
+        guard let result = larkRunProcess(executable: executable, arguments: arguments, timeout: 10) else { return (-1, Data()) }
+        return (result.timedOut ? -1 : result.status, result.out)
     }
     static func status(executable: String, runner: LarkProbeRunner = processRunner) -> LarkAuthStatus {
         let result = runner(executable, ["auth", "status", "--json"])
@@ -238,6 +225,7 @@ struct SettingsCard<Content: View>: View {
 struct SettingsContent: View {
     let model: Recorder?
     let live: MoLiveSession?
+    @StateObject private var placeholderLive = MoLiveSession()   // keeps the form observing something when no session is injected
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             SettingsCard(title: "通用", symbol: "keyboard") {
@@ -247,7 +235,7 @@ struct SettingsContent: View {
                 shortcut("小墨小墨", "唤醒词")
             }.id(SettingsSection.general)
             SettingsCard(title: "GPT-Live", symbol: "waveform") {
-                MoLiveSettingsForm(live: live)
+                MoLiveSettingsForm(live: live ?? placeholderLive)
             }.id(SettingsSection.live)
             SettingsCard(title: "会议", symbol: "person.2") {
                 if let model { MeetingSettingsForm(model: model) }
@@ -264,11 +252,11 @@ struct SettingsContent: View {
 
 /// GPT-Live settings (moved from the chat popover). Keychain and proxy behaviour are unchanged.
 struct MoLiveSettingsForm: View {
-    let live: MoLiveSession?
+    @ObservedObject var live: MoLiveSession
     @State private var key = ""
     @State private var notice = ""
     @State private var proxyURL = UserDefaults.standard.string(forKey: MoLiveNetwork.proxyKey) ?? ""
-    private var busy: Bool { live?.active ?? false }
+    private var busy: Bool { live.active }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("gpt-live-1 · Marin\n填写自己的 OpenAI API Key，保存在本机钥匙串。开始后语音会发送至 OpenAI，按 API 用量计费。")
@@ -321,6 +309,7 @@ struct LarkSettingsForm: View {
             HStack {
                 TextField(probe.detected ?? "lark-cli 路径（留空自动探测）", text: $path).textFieldStyle(.roundedBorder)
                     .onSubmit { commitPath() }
+                    .onChange(of: path) { commitPath() }
                 Button("重新检测") { commitPath(); probe.refresh(manual: LarkProxySettings.cliPath) }.disabled(probe.checking)
             }
             if let detected = probe.detected { Text("使用：" + detected).font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -337,6 +326,7 @@ struct LarkSettingsForm: View {
             Stepper(value: $poll, in: LarkProxySettings.pollRange, step: 5) {
                 Text("轮询间隔 \(Int(LarkProxySettings.clampPoll(poll))) 秒（10–120）").font(.system(size: 12))
             }
+            Text("开启代发后，私聊和 @ 你的消息及最近 20 条上下文会发送给本机 Codex 生成回复。").font(.system(size: 11)).foregroundStyle(.secondary)
             Text("以你本人身份通过 lark-cli 发送；凭据由 lark-cli 管理，Mo 不读取也不保存。").font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .onAppear { probe.refresh(manual: LarkProxySettings.cliPath) }
