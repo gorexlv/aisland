@@ -50,7 +50,8 @@ enum GameCommand: String, Equatable {
         }
     }
 }
-enum GameTarget: Equatable { case near, selected, units([Int]) }
+/// `.near` is an explicit "身边"/"跟我来"; `.defaultNear` is "no object given" and is only executed in king view.
+enum GameTarget: Equatable { case near, defaultNear, selected, units([Int]) }
 enum GameAction: Equatable { case command(GameCommand), pause, resume }
 struct GameIntent: Equatable {
     var action: GameAction
@@ -63,7 +64,7 @@ struct GameIntent: Equatable {
         case .resume: return "继续"
         case .command(let command):
             if command == .follow { return "跟我来" }
-            return (subject.isEmpty ? (target == .near ? "身边" : "") : subject) + command.label
+            return (subject.isEmpty ? (target == .near || target == .defaultNear ? "身边" : "") : subject) + command.label
         }
     }
     /// JSON-safe arguments for `__MoBridge.run`.
@@ -71,7 +72,7 @@ struct GameIntent: Equatable {
         guard case .command(let command) = action else { return nil }
         let targets: Any
         switch target {
-        case .near: targets = "near"
+        case .near, .defaultNear: targets = "near"
         case .selected: targets = "selected"
         case .units(let ids): targets = ids
         }
@@ -133,7 +134,7 @@ private let gameSubjectTypes: [(word: String, types: [String], label: String)] =
         ("所有人", all, "全军"), ("全军", all, "全军"), ("所有", all, "全军"), ("全体", all, "全军"), ("大家", all, "全军"),
         ("骑射", ["horseArcher"], "骑射"), ("重骑", ["heavyCav"], "重骑兵"), ("骑兵", ["heavyCav", "horseArcher"], "骑兵"),
         ("剑盾", ["swordShield"], "剑盾兵"), ("步兵", ["heavyShield", "swordShield", "pike"], "步兵"),
-        ("盾兵", ["swordShield", "heavyShield"], "盾兵"), ("长枪", ["pike"], "长枪兵"), ("枪兵", ["pike"], "长枪兵"),
+        ("重盾兵", ["heavyShield"], "重盾兵"), ("重盾", ["heavyShield"], "重盾兵"), ("盾兵", ["swordShield", "heavyShield"], "盾兵"), ("长枪", ["pike"], "长枪兵"), ("枪兵", ["pike"], "长枪兵"),
         ("弓箭手", ["archer", "crossbow"], "弓兵"), ("弓兵", ["archer", "crossbow"], "弓兵"), ("射手", ["archer", "crossbow"], "弓兵"),
         ("弩兵", ["crossbow"], "弩兵"), ("弩", ["crossbow"], "弩兵"), ("盾", ["swordShield", "heavyShield"], "盾兵"), ("弓", ["archer", "crossbow"], "弓兵"),
     ]
@@ -162,8 +163,57 @@ func gameContextualStrings(bats: [GameBat]) -> [String] {
     return words.filter { seen.insert($0).inserted }
 }
 
+private struct GameCommandMatch { let action: GameAction; var word: String; let start: Int; var end: Int }
+
+private let gameCommandWordList: [(word: String, action: GameAction)] = {
+    let flat = gameCommandWords.flatMap { entry in entry.1.map { (word: $0, action: entry.0) } }
+    return flat.enumerated().sorted { ($0.element.word.count, -$0.offset) > ($1.element.word.count, -$1.offset) }.map(\.element)
+}()
+
+private func gameScanCommands(_ chars: [Character]) -> [GameCommandMatch] {
+    var matches: [GameCommandMatch] = []
+    var index = 0
+    while index < chars.count {
+        var hit: GameCommandMatch?
+        for entry in gameCommandWordList {
+            let word = Array(entry.word)
+            if index + word.count <= chars.count, Array(chars[index..<index + word.count]) == word { hit = GameCommandMatch(action: entry.action, word: entry.word, start: index, end: index + word.count); break }
+        }
+        guard let hit else { index += 1; continue }
+        // "冲杀" is one charge, not two.
+        if var last = matches.last, last.end == hit.start, last.action == hit.action { last.word += hit.word; last.end = hit.end; matches[matches.count - 1] = last }
+        else { matches.append(hit) }
+        index = hit.end
+    }
+    return matches
+}
+
+/// Parses one utterance into the commands it contains, in order ("骑兵冲锋弓兵坚守" gives two).
+func gameParseCommands(_ text: String, bats: [GameBat], selected: Int? = nil) -> [GameIntent] {
+    let normalized = gameNormalize(text)
+    let stripped = gameStripWake(normalized)
+    let woke = stripped.count != normalized.count
+    let chars = Array(stripped)
+    var matches = gameScanCommands(chars)
+    if matches.contains(where: { if case .command = $0.action { return true } else { return false } }) {
+        matches.removeAll { $0.action == .pause || $0.action == .resume }   // "继续前进" is an advance, not a resume
+    }
+    guard !matches.isEmpty else { return [] }
+    var clauses: [(String, GameCommandMatch)] = []
+    if matches.count == 1 { clauses = [(stripped, matches[0])] }
+    else {
+        var previous = 0
+        for match in matches { clauses.append((String(chars[previous..<match.end]), match)); previous = match.end }
+    }
+    return clauses.compactMap { gameParseClause($0.0, match: $0.1, bats: bats, selected: selected, woke: woke) }
+}
+
 func gameParseCommand(_ text: String, bats: [GameBat], selected: Int? = nil) -> GameIntent? {
-    var rest = gameStripWake(gameNormalize(text))
+    gameParseCommands(text, bats: bats, selected: selected).first
+}
+
+private func gameParseClause(_ clause: String, match: GameCommandMatch, bats: [GameBat], selected: Int?, woke: Bool) -> GameIntent? {
+    var rest = clause
     let alive = bats.filter(\.alive)
     var ids: [Int] = []
     var subjects: [String] = []
@@ -179,9 +229,9 @@ func gameParseCommand(_ text: String, bats: [GameBat], selected: Int? = nil) -> 
     // A numbered battalion that is not on the field (already gone) must not fall back to its whole troop type.
     if let regex = try? NSRegularExpression(pattern: "(重盾兵|剑盾兵|长枪兵|弓兵|弩兵|骑射营|骑射|重骑兵|重骑|骑兵|步兵)?[0-9]+营") {
         let source = rest as NSString
-        for match in regex.matches(in: rest, range: NSRange(location: 0, length: source.length)).reversed() {
-            subjects.append(source.substring(with: match.range)); hasSubject = true
-            rest = (rest as NSString).replacingCharacters(in: match.range, with: "")
+        for found in regex.matches(in: rest, range: NSRange(location: 0, length: source.length)).reversed() {
+            subjects.append(source.substring(with: found.range)); hasSubject = true
+            rest = (rest as NSString).replacingCharacters(in: found.range, with: "")
         }
     }
     var near = false
@@ -192,17 +242,18 @@ func gameParseCommand(_ text: String, bats: [GameBat], selected: Int? = nil) -> 
         if !subjects.contains(entry.label) { subjects.append(entry.label) }
         hasSubject = true
     }
-    guard let action = gameCommandWords.first(where: { entry in entry.1.contains { rest.contains($0) } })?.0 else { return nil }
+    // A lone "冲"/"杀"/"撤" is too easy to hear by accident: require an object or the wake word.
+    if match.word.count == 1, !hasSubject, !near, !woke { return nil }
     let subject = subjects.joined(separator: "、")
-    switch action {
-    case .pause, .resume: return GameIntent(action: action, target: .near, subject: "")
-    case .command(.follow): return GameIntent(action: action, target: .near, subject: "")
+    switch match.action {
+    case .pause, .resume: return GameIntent(action: match.action, target: .near, subject: "")
+    case .command(.follow): return GameIntent(action: match.action, target: .near, subject: "")
     case .command(let command):
-        if near { return GameIntent(action: action, target: .near, subject: "") }
-        if hasSubject { return GameIntent(action: action, target: .units(ids), subject: subject) }
-        if selected != nil { return GameIntent(action: action, target: .selected, subject: "") }
-        if command == .charge || command == .hold || command == .auto { return GameIntent(action: action, target: .near, subject: "") }
-        return GameIntent(action: action, target: .units(alive.map(\.id)), subject: "全军")
+        if near { return GameIntent(action: match.action, target: .near, subject: "") }
+        if hasSubject { return GameIntent(action: match.action, target: .units(ids), subject: subject) }
+        if selected != nil { return GameIntent(action: match.action, target: .selected, subject: "") }
+        if command == .charge || command == .hold || command == .auto { return GameIntent(action: match.action, target: .defaultNear, subject: "") }
+        return GameIntent(action: match.action, target: .units(alive.map(\.id)), subject: "全军")
     }
 }
 
@@ -222,13 +273,26 @@ enum GameBridge {
       function alive(b){ return !!b && b.side === 0 && b.state !== 'gone' && b.state !== 'rout'; }
       function describe(b){ var t = b.type || {}; return {id: b.id, name: String(b.name || ''), typeId: String(b.typeId || ''), shooter: !!t.missile && !t.mounted, mounted: !!t.mounted, alive: true}; }
       function find(bt, id){ for (var i = 0; i < bt.bats.length; i++) { if (bt.bats[i] && bt.bats[i].id === id) return bt.bats[i]; } return null; }
+      // King view (the only view where quick() works) <=> the king's command bar #wKbar is shown (war.js sets wKbar.hidden = !kingView on every phase/view change).
+      function inKingView(){ var k = document.getElementById('wKbar'); return !!k && !k.hidden; }
+      function kingDead(d){ try { return !!(d.king && d.king.dead); } catch (e) { return false; } }
+      function snapshot(bt){
+        var parts = [];
+        for (var i = 0; i < bt.bats.length; i++) {
+          var b = bt.bats[i];
+          if (!alive(b)) continue;
+          var o = b.order || {};
+          parts.push(b.id + ':' + JSON.stringify([b.manual, o.kind, o.x, o.y, o.sprint, o.run, o.trot, o.target]));
+        }
+        return parts.join('|');
+      }
       function state(){
         try {
           var d = dbg(), bt = d && battle(d);
-          if (!bt) return out({ok: true, inBattle: false, paused: isPaused(), selected: null, bats: []});
+          if (!bt) return out({ok: true, inBattle: false, kingView: false, kingDead: false, paused: isPaused(), selected: null, bats: []});
           var bats = [], sel = selectedId(d);
           for (var i = 0; i < bt.bats.length; i++) { if (alive(bt.bats[i])) bats.push(describe(bt.bats[i])); }
-          return out({ok: true, inBattle: !bt.result, paused: isPaused(), selected: sel >= 0 ? sel : null, bats: bats});
+          return out({ok: true, inBattle: !bt.result, kingView: inKingView(), kingDead: kingDead(d), paused: isPaused(), selected: sel >= 0 ? sel : null, bats: bats});
         } catch (e) { return out({ok: false, message: String(e && e.message || e)}); }
       }
       function degrade(b, cmd){
@@ -237,37 +301,49 @@ enum GameBridge {
         if (shooter && (cmd === 'charge' || cmd === 'advance')) cmd = 'auto';
         return cmd;
       }
+      function fail(message, skipped){ return out({ok: false, done: [], skipped: skipped || [], message: message}); }
       function run(a){
+        var d, bt, original = -1, wasPaused = false, touched = false, restoreNeeded = false;
         try {
-          var d = dbg(), bt = d && battle(d);
-          if (!bt || bt.result) return out({ok: false, done: [], skipped: [], message: '还没开战'});
+          d = dbg(); bt = d && battle(d);
+          if (!bt || bt.result) return fail('还没开战');
           var cmd = String(a && a.cmd || ''), targets = a && a.targets, done = [], skipped = [];
           var known = {hold: 1, advance: 1, charge: 1, skirmish: 1, retreat: 1, auto: 1, follow: 1};
-          if (!known[cmd]) return out({ok: false, done: [], skipped: [], message: '不认识的命令'});
+          if (!known[cmd]) return fail('不认识的命令');
           if (targets === 'near') {
             var quick = {follow: 1, charge: 1, hold: 1, auto: 1};
-            if (!quick[cmd]) return out({ok: false, done: [], skipped: [{name: '身边的营', reason: '身边的营只支持跟随、冲锋、坚守、自由行动'}], message: '身边的营不支持这个命令'});
+            if (!quick[cmd]) return fail('身边的营不支持这个命令', [{name: '身边的营', reason: '身边的营只支持跟随、冲锋、坚守、自由行动'}]);
+            if (!inKingView()) return fail('地图视角下身边命令无效，请说兵种、营名或全军', [{name: '身边的营', reason: '不在国王视角'}]);
+            if (kingDead(d)) return fail('国王倒下了，等他回来再下命令', [{name: '身边的营', reason: '国王倒下了'}]);
+            var before = snapshot(bt);
             d.quick(cmd);
-            return out({ok: true, done: [{name: '身边的营', cmd: cmd}], skipped: [], message: '已对身边的营下令'});
+            if (snapshot(bt) === before) return fail('国王身边没有可指挥的营', [{name: '身边的营', reason: '国王身边没有可指挥的营'}]);
+            return out({ok: true, done: [{name: '身边的营', cmd: cmd}], skipped: [], message: '已发出'});
           }
-          if (cmd === 'follow') return out({ok: false, done: [], skipped: [{name: '全部', reason: '跟随只对身边的营'}], message: '跟随只对身边的营'});
-          var original = selectedId(d), wasPaused = isPaused(), touched = false, ids = [];
+          if (cmd === 'follow') return fail('跟随只对身边的营', [{name: '全部', reason: '跟随只对身边的营'}]);
+          original = selectedId(d); wasPaused = isPaused(); restoreNeeded = true;
+          var ids = [];
           if (targets === 'selected') { if (original >= 0) ids = [original]; }
           else if (Object.prototype.toString.call(targets) === '[object Array]') ids = targets;
-          if (!ids.length) return out({ok: false, done: [], skipped: [], message: targets === 'selected' ? '没有选中的营' : '没有对应的营'});
+          if (!ids.length) return fail(targets === 'selected' ? '没有选中的营' : '没有对应的营');
           for (var i = 0; i < ids.length; i++) {
             var b = find(bt, ids[i]);
             if (!alive(b)) { skipped.push({name: String(ids[i]), reason: '已经不在场'}); continue; }
             var k = degrade(b, cmd);
-            d.select(b.id); touched = true; d.command(k);
+            touched = true; d.select(b.id); d.command(k);
             var item = {name: String(b.name || ''), cmd: k};
             if (k !== cmd) item.from = cmd;
             done.push(item);
           }
-          if (touched) { try { d.select(original >= 0 ? original : -1); } catch (e) {} }
-          if (!wasPaused && isPaused()) { var pb = pauseButton(); if (pb) pb.click(); }
-          return out({ok: done.length > 0, done: done, skipped: skipped, message: done.length ? '已下令' : '没有可执行的营'});
-        } catch (e) { return out({ok: false, done: [], skipped: [], message: String(e && e.message || e)}); }
+          return out({ok: done.length > 0, done: done, skipped: skipped, message: done.length ? '已发出' : '没有可执行的营'});
+        } catch (e) { return fail(String(e && e.message || e)); }
+        finally {
+          // select() auto-pauses the game; always put selection and pause state back, even after an exception.
+          if (restoreNeeded) {
+            if (touched) { try { d.select(original >= 0 ? original : -1); } catch (e) {} }
+            try { if (!wasPaused && isPaused()) { var pb = pauseButton(); if (pb) pb.click(); } } catch (e) {}
+          }
+        }
       }
       function pause(want){
         try {
@@ -328,6 +404,18 @@ struct GameRunResult: Equatable {
     static func == (a: GameRunResult, b: GameRunResult) -> Bool {
         a.ok == b.ok && a.message == b.message && a.done.map { "\($0.name)|\($0.cmd)|\($0.from ?? "")" } == b.done.map { "\($0.name)|\($0.cmd)|\($0.from ?? "")" } && a.skipped.map { "\($0.name)|\($0.reason)" } == b.skipped.map { "\($0.name)|\($0.reason)" }
     }
+    /// What to say aloud: the actual outcome (degraded commands, refusals), not the raw request.
+    func spoken(for intent: GameIntent) -> String {
+        guard ok, !done.isEmpty else {
+            if let first = skipped.first, done.isEmpty, message == "没有可执行的营" { return first.reason }
+            return message.isEmpty ? "没有执行" : message
+        }
+        let degraded = done.contains { $0.from != nil }
+        if !degraded { return intent.spoken }
+        var parts = done.prefix(3).map { item -> String in "\(item.name)\(GameCommand(rawValue: item.cmd)?.label ?? item.cmd)" }
+        if done.count > 3 { parts.append("等\(done.count)个营") }
+        return parts.joined(separator: "，")
+    }
     var summary: String {
         var parts = done.map { item -> String in
             let label = GameCommand(rawValue: item.cmd)?.label ?? item.cmd
@@ -342,17 +430,25 @@ struct GameRunResult: Equatable {
 // MARK: - Sentence splitter (pure)
 
 /// Turns a growing partial transcript into sentences: a sentence ends after `idle` seconds without new text.
+/// Text is compared normalized (no punctuation/spaces, Chinese battalion numbers as digits), so the recognizer
+/// re-punctuating or rewriting already delivered words never re-submits them.
 struct GameSentenceSplitter {
     var idle: TimeInterval = 0.8
     private var consumed = ""
     private var latest = ""
     private var changedAt: Date?
     private func pending(_ full: String) -> String {
-        let text = full.hasPrefix(consumed) ? String(full.dropFirst(consumed.count)) : full
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !consumed.isEmpty else { return full }
+        if full.hasPrefix(consumed) { return String(full.dropFirst(consumed.count)) }
+        if let range = full.range(of: consumed, options: .backwards) { return String(full[range.upperBound...]) }
+        // The recognizer rewrote text we already delivered: if most of it still matches, treat that region as consumed.
+        let common = zip(full, consumed).prefix { $0 == $1 }.count
+        if common * 2 >= consumed.count { return String(full.dropFirst(min(full.count, consumed.count))) }
+        return full   // a genuinely new utterance
     }
     mutating func feed(_ full: String, now: Date) {
-        if full != latest { latest = full; changedAt = now }
+        let text = gameNormalize(full)
+        if text != latest { latest = text; changedAt = now }
     }
     mutating func poll(now: Date) -> String? {
         guard let changedAt, now.timeIntervalSince(changedAt) >= idle else { return nil }
@@ -389,20 +485,32 @@ struct GameSentenceSplitter {
     private var failures: [Date] = []
     private var paused = false
 
+    /// Set when the on-device model is unavailable and Apple's servers are used instead.
+    private(set) var online = false
+    /// Bumped by stop(); every await in start() re-checks it so a stop during permission prompts / mic start wins.
+    private var generation = UUID()
+    struct Cancelled: Error {}
+
     func start() async throws {
         guard !running else { return }
+        let mine = UUID(); generation = mine
         let mic = await AVCaptureDevice.requestAccess(for: .audio)
+        guard generation == mine else { throw Cancelled() }
         let speech: SFSpeechRecognizerAuthorizationStatus = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0) }
         }
+        guard generation == mine else { throw Cancelled() }
         guard mic, speech == .authorized else { throw NotesFailure(detail: "请允许麦克风和语音识别权限后重试") }
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")), recognizer.isAvailable else { throw NotesFailure(detail: "中文语音识别暂不可用") }
-        self.recognizer = recognizer; running = true; paused = false; failures = []
-        do { try await begin() } catch { running = false; teardown(); throw error }
+        self.recognizer = recognizer; online = !recognizer.supportsOnDeviceRecognition
+        running = true; paused = false; failures = []
+        do { try await begin() } catch { if generation == mine { running = false }; teardown(); throw error }
+        guard generation == mine else { teardown(); throw Cancelled() }
         ticker = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
     func stop() {
-        running = false; paused = false
+        generation = UUID()
+        running = false; paused = false; online = false
         ticker?.invalidate(); ticker = nil
         teardown()
         splitter.reset()
@@ -506,10 +614,12 @@ struct GameRecord: Identifiable, Equatable {
     @Published var inBattle = false
     @Published var bats: [GameBat] = []
     @Published var selected: Int?
+    @Published var kingView = false
     @Published var records: [GameRecord] = []
     @Published var status = ""
     @Published var recordsShown = true
     @Published var lastError: String?
+    @Published var online = false
     var inputLevel: CGFloat = 0
     weak var webView: WKWebView?
     /// Returns why the microphone cannot be used right now (meeting, GPT-Live, ...), nil when free.
@@ -532,7 +642,7 @@ struct GameRecord: Identifiable, Equatable {
 
     var statusLine: String {
         if !status.isEmpty { return status }
-        if listening { return inBattle ? "在听" : "在听 · 还没开战" }
+        if listening { return (inBattle ? "在听" : "在听 · 还没开战") + (online ? " · 使用 Apple 在线识别" : "") }
         return inBattle ? "麦克风已关" : "还没开战"
     }
 
@@ -559,6 +669,7 @@ struct GameRecord: Identifiable, Equatable {
         inBattle = object["inBattle"] as? Bool ?? false
         bats = GameBridge.parseBats(object)
         selected = object["selected"] as? Int
+        kingView = object["kingView"] as? Bool ?? false
         recognizer.contextualStrings = gameContextualStrings(bats: bats)
     }
 
@@ -576,13 +687,14 @@ struct GameRecord: Identifiable, Equatable {
                 recognizer.contextualStrings = gameContextualStrings(bats: bats)
                 try await recognizer.start()
                 guard active else { recognizer.stop(); return }
-                listening = true; status = ""
+                listening = true; online = recognizer.online; status = ""; lastError = nil
+            } catch is GameRecognizer.Cancelled { // stopped while starting: nothing to report
             } catch { listening = false; status = error.localizedDescription; lastError = error.localizedDescription }
         }
     }
     func stopListening(status text: String) {
         recognizer.stop()
-        listening = false; preparing = false; inputLevel = 0; status = text
+        listening = false; preparing = false; online = false; inputLevel = 0; status = text
     }
     private func listeningFailed(_ message: String) {
         listening = false; inputLevel = 0; status = message; lastError = message
@@ -598,21 +710,37 @@ struct GameRecord: Identifiable, Equatable {
     func process(_ text: String) async {
         guard active, let webView else { return }
         await refreshState()
-        guard let intent = gameParseCommand(text, bats: bats, selected: selected) else {
-            add(said: text, result: "没听懂：" + text, kind: .unknown); return
+        let intents = gameParseCommands(text, bats: bats, selected: selected)
+        guard !intents.isEmpty else { add(said: text, result: "没听懂：" + text, kind: .unknown); return }
+        guard inBattle else {
+            add(said: text, result: "还没开战，没有发出", kind: .skipped)
+            speak("还没开战"); return
         }
-        guard inBattle else { add(said: text, result: "还没开战，没有执行", kind: .skipped); return }
         executing = true; defer { executing = false }
-        let result: GameRunResult
-        switch intent.action {
-        case .pause: result = GameRunResult(await GameBridge.call(webView, "pause", true))
-        case .resume: result = GameRunResult(await GameBridge.call(webView, "pause", false))
-        case .command: result = GameRunResult(await GameBridge.call(webView, "run", intent.runArguments))
+        var replies: [String] = []
+        for (index, original) in intents.enumerated() {
+            var intent = original
+            let said = index == 0 ? text : "（同一句）" + intent.spoken
+            if intent.target == .defaultNear {
+                guard kingView else {
+                    let message = "地图视角请说兵种、营名或全军"
+                    add(said: said, result: message, kind: .skipped); replies.append("请说兵种或营名"); continue
+                }
+                intent.target = .near
+            }
+            let result: GameRunResult
+            switch intent.action {
+            case .pause: result = GameRunResult(await GameBridge.call(webView, "pause", true))
+            case .resume: result = GameRunResult(await GameBridge.call(webView, "pause", false))
+            case .command: result = GameRunResult(await GameBridge.call(webView, "run", intent.runArguments))
+            }
+            let succeeded: Bool
+            if case .command = intent.action { succeeded = result.ok && !result.done.isEmpty } else { succeeded = result.ok }
+            if succeeded { lastError = nil }
+            add(said: said, result: result.summary, kind: succeeded ? .done : .skipped)
+            replies.append(result.spoken(for: intent))
         }
-        let succeeded: Bool
-        if case .command = intent.action { succeeded = result.ok && !result.done.isEmpty } else { succeeded = result.ok }
-        add(said: text, result: result.summary, kind: succeeded ? .done : .skipped)
-        if succeeded { speak(intent.spoken) }
+        speak(replies.joined(separator: "，"))
     }
 
     // MARK: Spoken reply
@@ -730,7 +858,7 @@ struct GameRecordView: View {
                                     Spacer(minLength: 2)
                                 }
                                 Text("你说：" + record.said).font(.system(size: 11)).lineLimit(2)
-                                Text(record.kind == .unknown ? record.result : "执行：" + record.result).font(.system(size: 11)).foregroundStyle(color(record.kind)).lineLimit(3)
+                                Text(record.kind == .unknown ? record.result : (record.kind == .done ? "已发出：" : "未发出：") + record.result).font(.system(size: 11)).foregroundStyle(color(record.kind)).lineLimit(3)
                             }
                         }
                     }
@@ -762,7 +890,7 @@ struct GameSettingsForm: View {
                 if GameSettings.validURL(url) == nil { Text("地址无效，将使用正式版").font(.system(size: 11)).foregroundStyle(Color.orange) }
             }
             Toggle("语音回应", isOn: $reply)
-            Text("从菜单栏「陪玩 · 守城小国王」打开游戏窗口，小墨挂在窗口上，说「骑兵冲锋」「全军撤退」即可指挥。识别优先在本机完成，不说话时不联网。").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("从菜单栏「陪玩 · 守城小国王」打开游戏窗口，小墨挂在窗口上，说「骑兵冲锋」「全军撤退」即可指挥。识别优先在本机完成；本机不支持时会使用 Apple 在线识别（此时状态行会提示），语音回应在本机合成。").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

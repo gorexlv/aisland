@@ -49,9 +49,9 @@ let cases: [Case] = [
     c("骑兵跟着我", intent(.command(.follow), .near)),
     c("暂停", intent(.pause, .near)),
     c("小莫小莫继续", intent(.resume, .near)),
-    c("冲锋", intent(.command(.charge), .near)),
-    c("坚守", intent(.command(.hold), .near)),
-    c("自动", intent(.command(.auto), .near)),
+    c("冲锋", intent(.command(.charge), .defaultNear)),
+    c("坚守", intent(.command(.hold), .defaultNear)),
+    c("自动", intent(.command(.auto), .defaultNear)),
     c("撤退", intent(.command(.retreat), .units(allIDs), "全军")),
     c("前进", intent(.command(.advance), .units(allIDs), "全军")),
     c("风筝", intent(.command(.skirmish), .units(allIDs), "全军")),
@@ -60,6 +60,14 @@ let cases: [Case] = [
     c("冲锋", intent(.command(.charge), .selected), selected: 0),
     c("骑兵撤退", intent(.command(.retreat), .units([6, 7]), "骑兵"), selected: 4),
     c("骑兵和弓兵冲锋", intent(.command(.charge), .units([6, 7, 4, 5]), "骑兵、弓兵")),
+    c("重盾兵冲锋", intent(.command(.charge), .units([0]), "重盾兵")),
+    c("重盾坚守", intent(.command(.hold), .units([0]), "重盾兵")),
+    c("撤", nil),
+    c("冲", nil),
+    c("杀", nil),
+    c("冲杯咖啡", nil),
+    c("小墨小墨撤", intent(.command(.retreat), .units(allIDs), "全军")),
+    c("小莫小莫冲", intent(.command(.charge), .defaultNear)),
     c("随便说说", nil),
     c("今天天气不错", nil),
     c("小墨小墨", nil),
@@ -72,6 +80,23 @@ for (index, item) in cases.enumerated() {
     precondition(result == item.expected, "case \(index) [\(item.text)] expected \(String(describing: item.expected)) got \(String(describing: result))")
 }
 precondition(cases.count >= 30)
+
+// Several commands in one sentence run in order; "冲杀" is a single charge; "继续前进" is an advance.
+func multi(_ text: String) -> [GameIntent] { gameParseCommands(text, bats: bats) }
+precondition(multi("骑兵冲锋弓兵坚守") == [intent(.command(.charge), .units([6, 7]), "骑兵"), intent(.command(.hold), .units([4, 5]), "弓兵")], "\(multi("骑兵冲锋弓兵坚守"))")
+precondition(multi("小墨小墨骑兵冲杀，弓箭手撤退") == [intent(.command(.charge), .units([6, 7]), "骑兵"), intent(.command(.retreat), .units([4, 5]), "弓兵")])
+precondition(multi("继续前进") == [intent(.command(.advance), .units(allIDs), "全军")])
+precondition(multi("全军前进暂停") == [intent(.command(.advance), .units(allIDs), "全军")])
+precondition(multi("剑盾兵一营前进重骑兵二营冲锋").count == 2)
+precondition(multi("随便说说").isEmpty && multi("").isEmpty)
+
+// Spoken outcome.
+let degradedResult = GameRunResult(["ok": true, "done": [["name": "弓兵1营", "cmd": "auto", "from": "charge"], ["name": "重骑兵", "cmd": "charge"]], "skipped": [], "message": "已发出"])
+precondition(degradedResult.spoken(for: gameParseCommand("骑兵弓兵冲锋", bats: bats)!) == "弓兵1营自由行动，重骑兵冲锋")
+let plainResult = GameRunResult(["ok": true, "done": [["name": "重骑兵", "cmd": "charge"]], "skipped": [], "message": "已发出"])
+precondition(plainResult.spoken(for: gameParseCommand("重骑兵冲锋", bats: bats)!) == "重骑兵冲锋")
+let nearFail = GameRunResult(["ok": false, "done": [], "skipped": [], "message": "国王身边没有可指挥的营"])
+precondition(nearFail.spoken(for: gameParseCommand("跟我来", bats: bats)!) == "国王身边没有可指挥的营")
 
 // Spoken replies and bridge arguments.
 precondition(gameParseCommand("骑兵冲锋", bats: bats)?.spoken == "骑兵冲锋")
@@ -111,6 +136,24 @@ precondition(splitter.poll(now: t0.addingTimeInterval(4)) == "全军撤退")
 splitter.feed("全军撤退暂停", now: t0.addingTimeInterval(5))
 precondition(splitter.finish() == "全军撤退暂停")
 precondition(splitter.finish() == nil)
+
+// Punctuation / digit rewrites of delivered text are not re-submitted; punctuation-only text is ignored.
+var again = GameSentenceSplitter()
+again.feed("骑兵冲锋", now: t0)
+precondition(again.poll(now: t0.addingTimeInterval(1)) == "骑兵冲锋")
+again.feed("骑兵，冲锋。", now: t0.addingTimeInterval(2))
+precondition(again.poll(now: t0.addingTimeInterval(3)) == nil, "re-punctuated text must not repeat")
+again.feed("骑兵，冲锋。全军撤退", now: t0.addingTimeInterval(4))
+precondition(again.poll(now: t0.addingTimeInterval(5)) == "全军撤退")
+again.feed("骑兵，冲锋。全军撤退。。", now: t0.addingTimeInterval(6))
+precondition(again.poll(now: t0.addingTimeInterval(7)) == nil)
+again.feed("。，", now: t0.addingTimeInterval(8))
+precondition(again.poll(now: t0.addingTimeInterval(9)) == nil)
+var rewrite = GameSentenceSplitter()
+rewrite.feed("骑兵冲锋", now: t0)
+precondition(rewrite.poll(now: t0.addingTimeInterval(1)) == "骑兵冲锋")
+rewrite.feed("骑兵冲封全军撤退", now: t0.addingTimeInterval(2))   // earlier words rewritten by the recognizer
+precondition(rewrite.poll(now: t0.addingTimeInterval(3)) == "全军撤退", "rewrite must not re-run the first command")
 
 print("game-command ok (\(cases.count) cases)")
 exit(0)

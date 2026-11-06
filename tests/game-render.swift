@@ -43,6 +43,10 @@ Task { @MainActor in
     try render("game-record-light", scheme: .light, size: preview, GameRecordView(session: session))
     session.status = "请先结束会议"
     try render("game-record-status", scheme: .dark, size: preview, GameRecordView(session: session))
+    session.status = ""; session.listening = true; session.online = true   // flags only; nothing opens the microphone
+    precondition(session.statusLine == "在听 · 使用 Apple 在线识别", session.statusLine)
+    try render("game-record-online", scheme: .dark, size: preview, GameRecordView(session: session))
+    session.listening = false; session.online = false
     session.end()
     precondition(session.panels.toolbar == nil && session.panels.record == nil && !session.active)
     print("PASS: game render")

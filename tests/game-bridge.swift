@@ -5,8 +5,9 @@ let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 
 let page = """
-<html><body><button id="wPause">暂停</button><script>
-window.calls = []; window.sel = -1; window.inBattle = true; window.autoPause = true; window.explode = false;
+<html><body><button id="wPause">暂停</button><div id="wKbar"></div><script>
+window.calls = []; window.sel = -1; window.inBattle = true; window.autoPause = true; window.explode = false; window.explodeOn = -99; window.kingDead = false; window.nearIds = [0, 1];
+var kbar = document.getElementById('wKbar'); window.setView = function(king) { kbar.hidden = !king; }; window.setView(true);
 var pauseButton = document.getElementById('wPause');
 pauseButton.addEventListener('click', function(){ window.calls.push('pause-click'); pauseButton.textContent = pauseButton.textContent === '暂停' ? '继续' : '暂停'; });
 var bats = [
@@ -21,10 +22,18 @@ var bats = [
 ];
 window.__LK = {War: {debug: {
   get battle() { return window.inBattle ? {bats: bats} : null; },
-  get selected() { return window.sel; },
+  get king() { return {dead: window.kingDead}; },
   select: function(id) { window.calls.push('select:' + id); window.sel = id; if (id >= 0 && window.autoPause && pauseButton.textContent === '暂停') pauseButton.click(); },
-  command: function(k) { if (window.explode) throw new Error('boom'); window.calls.push('command:' + k + '@' + window.sel); },
-  quick: function(k) { window.calls.push('quick:' + k); }
+  command: function(k) {
+    if (window.explode || window.sel === window.explodeOn) throw new Error('boom');
+    window.calls.push('command:' + k + '@' + window.sel);
+    if (window.sel >= 0) { bats[window.sel].manual = k !== 'auto'; bats[window.sel].order = {kind: k}; }
+  },
+  quick: function(k) {   // like war.js quick(): silent no-op outside king view, toast when the king is down or nobody is near
+    window.calls.push('quick:' + k);
+    if (kbar.hidden || window.kingDead) return;
+    window.nearIds.forEach(function(id) { bats[id].manual = k !== 'auto'; bats[id].order = {kind: k}; });
+  }
 }}};
 </script></body></html>
 """
@@ -53,7 +62,7 @@ Task { @MainActor in
     }
     func script(_ source: String) async { _ = try? await web.evaluateJavaScript(source) }
     func reset(sel: Int = -1, paused: Bool = false) async {
-        await script("window.calls = []; window.sel = \(sel); window.inBattle = true; window.explode = false; document.getElementById('wPause').textContent = '\(paused ? "继续" : "暂停")';")
+        await script("window.calls = []; window.sel = \(sel); window.inBattle = true; window.explode = false; window.explodeOn = -99; window.kingDead = false; window.nearIds = [0, 1]; window.setView(true); bats.forEach(function(b) { b.manual = false; b.order = {kind: 'idle'}; }); document.getElementById('wPause').textContent = '\(paused ? "继续" : "暂停")';")
     }
     var L: [String] = [], P = ""
     func sync() async { L = await calls(); P = await pausedText() }
@@ -94,21 +103,48 @@ Task { @MainActor in
     await reset(sel: 3, paused: true)
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": [0], "cmd": "hold"]))
     log = await calls()
-    precondition(log == ["select:0", "command:hold@0", "select:3"], "restore log \(log)")
+    // The real game has no selected getter, so the previous pick is unknown: selection is cleared (select(-1)).
+    precondition(log == ["select:0", "command:hold@0", "select:-1"], "restore log \(log)")
     await sync(); precondition(P == "继续", "paused game must stay paused")
 
-    // selected target uses the current selection.
+    // "selected" has nothing to act on without a selected getter.
     await reset(sel: 2)
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "selected", "cmd": "advance"]))
-    precondition(result.ok && result.done.map(\.name) == ["骑射营"], "selected \(result.summary)")
-    await reset()
-    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "selected", "cmd": "advance"]))
-    await sync(); precondition(!result.ok && result.message == "没有选中的营" && L.isEmpty)
+    await sync()
+    precondition(!result.ok && result.message == "没有选中的营" && L.isEmpty)
 
     // near goes through quick(); unsupported commands are refused without any call.
     await reset()
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "charge"]))
-    await sync(); precondition(result.ok && L == ["quick:charge"])
+    await sync(); precondition(result.ok && result.message == "已发出" && L == ["quick:charge"], "near \(result.summary)")
+    // Repeating the same order changes nothing: reported as not issued instead of a false success.
+    await reset()
+    await script("bats[0].manual = true; bats[0].order = {kind: 'charge'}; bats[1].manual = true; bats[1].order = {kind: 'charge'};")
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "charge"]))
+    precondition(!result.ok && result.message == "国王身边没有可指挥的营", "unchanged near \(result.summary)")
+    // Nobody near the king.
+    await reset()
+    await script("window.nearIds = []")
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "hold"]))
+    precondition(!result.ok && result.message == "国王身边没有可指挥的营")
+    // King down: refuse before calling quick().
+    await reset()
+    await script("window.kingDead = true")
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "hold"]))
+    await sync(); precondition(!result.ok && result.message.contains("国王倒下") && L.isEmpty)
+    // Map view: quick() would silently do nothing, so near is refused with guidance and quick() is never called.
+    await reset()
+    await script("window.setView(false)")
+    object = await GameBridge.call(web, "state")
+    precondition(object["kingView"] as? Bool == false && object["inBattle"] as? Bool == true)
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "charge"]))
+    await sync(); precondition(!result.ok && result.message.contains("地图视角") && L.isEmpty, "map view \(result.message)")
+    // Unit targets still work in map view.
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": [0], "cmd": "hold"]))
+    precondition(result.ok && result.done.count == 1)
+    await reset()
+    object = await GameBridge.call(web, "state")
+    precondition(object["kingView"] as? Bool == true)
     await reset()
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "retreat"]))
     await sync(); precondition(!result.ok && L.isEmpty)
@@ -146,6 +182,14 @@ Task { @MainActor in
     await script("window.explode = true")
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": [0], "cmd": "hold"]))
     precondition(!result.ok && result.message == "boom", "explode \(result.message)")
+
+    // An exception on the second battalion must still restore selection and resume a running game.
+    await reset()
+    await script("window.explodeOn = 1")
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": [0, 1, 2], "cmd": "hold"]))
+    await sync()
+    precondition(!result.ok && result.message == "boom", "mid-loop \(result.message)")
+    precondition(L.last == "pause-click" && L.contains("select:-1") && P == "暂停", "mid-loop cleanup \(L) \(P)")
 
     // pause(bool).
     await reset()
