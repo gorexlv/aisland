@@ -2,6 +2,12 @@ import Cocoa
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 Task { @MainActor in
+    for heard in ["小莫小莫 能听到吗","小莫小莫能听到吗? 听到回复一声","小魔小魔，看下这里","晓墨晓墨","小墨，在吗","xiao mo xiao mo"] {
+        precondition(moIsAddressed(heard), "Homophones of the wake word must wake: \(heard)")
+    }
+    for other in ["这里改成蓝色","别消磨时间","小明说的方案","名字叫小墨"] {
+        precondition(!moIsAddressed(other), "Must not wake: \(other)")
+    }
     let quiet = MoLiveSession()
     quiet.receive(["type":"session.input_transcript.delta","event_id":"plain","delta":"这里改成蓝色","start_ms":0,"end_ms":500])
     quiet.receive(["type":"session.output_transcript.delta","event_id":"not-addressed","delta":"不会显示","start_ms":600,"end_ms":800])
