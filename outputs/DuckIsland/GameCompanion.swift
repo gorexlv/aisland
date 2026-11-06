@@ -196,7 +196,9 @@ func gameParseCommands(_ text: String, bats: [GameBat], selected: Int? = nil) ->
     let chars = Array(stripped)
     var matches = gameScanCommands(chars)
     if matches.contains(where: { if case .command = $0.action { return true } else { return false } }) {
-        matches.removeAll { $0.action == .pause || $0.action == .resume }   // "继续前进" is an advance, not a resume
+        // "继续前进" is an advance, not a resume; a pause/resume AFTER a command ("全军撤退暂停") is its own command.
+        let firstCommand = matches.firstIndex { if case .command = $0.action { return true } else { return false } }!
+        matches = matches.enumerated().filter { $0.offset > firstCommand || ($0.element.action != .pause && $0.element.action != .resume) }.map(\.element)
     }
     guard !matches.isEmpty else { return [] }
     var clauses: [(String, GameCommandMatch)] = []
@@ -276,16 +278,9 @@ enum GameBridge {
       // King view (the only view where quick() works) <=> the king's command bar #wKbar is shown (war.js sets wKbar.hidden = !kingView on every phase/view change).
       function inKingView(){ var k = document.getElementById('wKbar'); return !!k && !k.hidden; }
       function kingDead(d){ try { return !!(d.king && d.king.dead); } catch (e) { return false; } }
-      function snapshot(bt){
-        var parts = [];
-        for (var i = 0; i < bt.bats.length; i++) {
-          var b = bt.bats[i];
-          if (!alive(b)) continue;
-          var o = b.order || {};
-          parts.push(b.id + ':' + JSON.stringify([b.manual, o.kind, o.x, o.y, o.sprint, o.run, o.trot, o.target]));
-        }
-        return parts.join('|');
-      }
+      // quick() always toasts in #wToast: "身边 N 个营：…" on success, "国王身边 X 米内没有我方的营" / "国王倒下了…" on failure.
+      function toastText(){ var t = document.getElementById('wToast'); return (t && !t.hidden) ? String(t.textContent || '').trim() : ''; }
+      function clearToast(){ var t = document.getElementById('wToast'); if (t) { t.textContent = ''; t.hidden = true; } }
       function state(){
         try {
           var d = dbg(), bt = d && battle(d);
@@ -314,11 +309,11 @@ enum GameBridge {
             var quick = {follow: 1, charge: 1, hold: 1, auto: 1};
             if (!quick[cmd]) return fail('身边的营不支持这个命令', [{name: '身边的营', reason: '身边的营只支持跟随、冲锋、坚守、自由行动'}]);
             if (!inKingView()) return fail('地图视角下身边命令无效，请说兵种、营名或全军', [{name: '身边的营', reason: '不在国王视角'}]);
-            if (kingDead(d)) return fail('国王倒下了，等他回来再下命令', [{name: '身边的营', reason: '国王倒下了'}]);
-            var before = snapshot(bt);
+            clearToast();
             d.quick(cmd);
-            if (snapshot(bt) === before) return fail('国王身边没有可指挥的营', [{name: '身边的营', reason: '国王身边没有可指挥的营'}]);
-            return out({ok: true, done: [{name: '身边的营', cmd: cmd}], skipped: [], message: '已发出'});
+            var toast = toastText();
+            if (/没有我方的营|国王倒下了/.test(toast)) return fail(toast, [{name: '身边的营', reason: toast}]);
+            return out({ok: true, done: [{name: '身边的营', cmd: cmd}], skipped: [], message: /^身边 \\d+ 个营/.test(toast) ? toast : '已发出'});
           }
           if (cmd === 'follow') return fail('跟随只对身边的营', [{name: '全部', reason: '跟随只对身边的营'}]);
           original = selectedId(d); wasPaused = isPaused(); restoreNeeded = true;
@@ -411,9 +406,13 @@ struct GameRunResult: Equatable {
             return message.isEmpty ? "没有执行" : message
         }
         let degraded = done.contains { $0.from != nil }
-        if !degraded { return intent.spoken }
-        var parts = done.prefix(3).map { item -> String in "\(item.name)\(GameCommand(rawValue: item.cmd)?.label ?? item.cmd)" }
-        if done.count > 3 { parts.append("等\(done.count)个营") }
+        var parts: [String]
+        if !degraded { parts = [intent.spoken] }
+        else {
+            parts = done.prefix(3).map { item -> String in "\(item.name)\(GameCommand(rawValue: item.cmd)?.label ?? item.cmd)" }
+            if done.count > 3 { parts.append("等\(done.count)个营") }
+        }
+        if !skipped.isEmpty { parts.append("\(skipped.count)个营不在场") }
         return parts.joined(separator: "，")
     }
     var summary: String {
@@ -423,6 +422,7 @@ struct GameRunResult: Equatable {
             return "\(item.name) \(label)"
         }
         parts += skipped.map { "跳过 \($0.name)：\($0.reason)" }
+        if !done.isEmpty, message != "已发出", message != "已下令", !message.isEmpty { parts.append(message) }
         return parts.isEmpty ? message : parts.joined(separator: "；")
     }
 }
@@ -504,8 +504,12 @@ struct GameSentenceSplitter {
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")), recognizer.isAvailable else { throw NotesFailure(detail: "中文语音识别暂不可用") }
         self.recognizer = recognizer; online = !recognizer.supportsOnDeviceRecognition
         running = true; paused = false; failures = []
-        do { try await begin() } catch { if generation == mine { running = false }; teardown(); throw error }
-        guard generation == mine else { teardown(); throw Cancelled() }
+        do { try await begin() } catch {
+            // Only the owning generation may tear down; a newer start() owns the shared state now.
+            if generation == mine { running = false; teardown() }
+            throw error
+        }
+        guard generation == mine else { throw Cancelled() }
         ticker = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in Task { @MainActor in self?.tick() } }
     }
     func stop() {
@@ -535,21 +539,28 @@ struct GameSentenceSplitter {
         request.shouldReportPartialResults = true
         if recognizer.supportsOnDeviceRecognition { request.requiresOnDeviceRecognition = true }
         request.contextualStrings = Array(contextualStrings.prefix(100))
-        task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+        let newTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
             let final = result?.isFinal == true, failed = error != nil
             Task { @MainActor [weak self] in self?.receive(current, text, final: final, failed: failed) }
         }
+        task = newTask
         let capture = VoiceMicrophoneCapture(); self.capture = capture
-        _ = try await capture.start(request: request, deviceID: deviceID, level: { [weak self] level in
-            Task { @MainActor [weak self] in self?.onLevel(level) }
-        }, failure: { [weak self] message in
-            Task { @MainActor [weak self] in
-                guard let self, self.token == current else { return }
-                self.stop(); self.onFailure("录音失败：" + message)
-            }
-        })
-        if token != current { capture.stop() }
+        do {
+            _ = try await capture.start(request: request, deviceID: deviceID, level: { [weak self] level in
+                Task { @MainActor [weak self] in self?.onLevel(level) }
+            }, failure: { [weak self] message in
+                Task { @MainActor [weak self] in
+                    guard let self, self.token == current else { return }
+                    self.stop(); self.onFailure("录音失败：" + message)
+                }
+            })
+        } catch {
+            // Clean up only what this call created; shared state may already belong to a newer start.
+            capture.stop(); newTask.cancel()
+            throw error
+        }
+        if token != current { capture.stop(); newTask.cancel() }   // stopped or superseded while the microphone was starting
     }
     private func receive(_ current: UUID, _ text: String?, final: Bool, failed: Bool) {
         guard running, !paused, token == current else { return }
@@ -630,6 +641,7 @@ struct GameRecord: Identifiable, Equatable {
     private let synthesizer = AVSpeechSynthesizer()
     private var poller: Timer?
     private var polling = false
+    private var prepareGeneration = UUID()
 
     override init() {
         super.init()
@@ -681,18 +693,24 @@ struct GameRecord: Identifiable, Equatable {
         guard active, !listening, !preparing else { return }
         if let reason = microphoneBlockReason() { status = reason; return }
         preparing = true; status = "正在打开麦克风…"
+        let mine = UUID(); prepareGeneration = mine
         Task {
-            defer { preparing = false }
+            defer { if prepareGeneration == mine { preparing = false } }
             do {
                 recognizer.contextualStrings = gameContextualStrings(bats: bats)
                 try await recognizer.start()
+                guard prepareGeneration == mine else { return }
                 guard active else { recognizer.stop(); return }
                 listening = true; online = recognizer.online; status = ""; lastError = nil
             } catch is GameRecognizer.Cancelled { // stopped while starting: nothing to report
-            } catch { listening = false; status = error.localizedDescription; lastError = error.localizedDescription }
+            } catch {
+                guard prepareGeneration == mine else { return }
+                listening = false; status = error.localizedDescription; lastError = error.localizedDescription
+            }
         }
     }
     func stopListening(status text: String) {
+        prepareGeneration = UUID()
         recognizer.stop()
         listening = false; preparing = false; online = false; inputLevel = 0; status = text
     }

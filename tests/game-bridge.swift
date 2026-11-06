@@ -5,7 +5,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 
 let page = """
-<html><body><button id="wPause">暂停</button><div id="wKbar"></div><script>
+<html><body><button id="wPause">暂停</button><div id="wKbar"></div><div id="wToast" hidden></div><script>
 window.calls = []; window.sel = -1; window.inBattle = true; window.autoPause = true; window.explode = false; window.explodeOn = -99; window.kingDead = false; window.nearIds = [0, 1];
 var kbar = document.getElementById('wKbar'); window.setView = function(king) { kbar.hidden = !king; }; window.setView(true);
 var pauseButton = document.getElementById('wPause');
@@ -29,10 +29,16 @@ window.__LK = {War: {debug: {
     window.calls.push('command:' + k + '@' + window.sel);
     if (window.sel >= 0) { bats[window.sel].manual = k !== 'auto'; bats[window.sel].order = {kind: k}; }
   },
-  quick: function(k) {   // like war.js quick(): silent no-op outside king view, toast when the king is down or nobody is near
+  quick: function(k) {   // like war.js quick(): silent no-op outside king view; otherwise always a toast
     window.calls.push('quick:' + k);
-    if (kbar.hidden || window.kingDead) return;
-    window.nearIds.forEach(function(id) { bats[id].manual = k !== 'auto'; bats[id].order = {kind: k}; });
+    if (kbar.hidden) return;
+    var toast = document.getElementById('wToast');
+    function say(t) { toast.textContent = t; toast.hidden = false; }
+    if (window.kingDead) { say('国王倒下了，等他回来再下命令'); return; }
+    if (!window.nearIds.length) { say('国王身边 40 米内没有我方的营'); return; }
+    // Only fields the bridge can see change for some orders (auto on AI battalions, shooters converting to auto change nothing).
+    if (k !== 'auto' && k !== 'follow') window.nearIds.forEach(function(id) { bats[id].manual = true; bats[id].order = {kind: k}; });
+    say('身边 ' + window.nearIds.length + ' 个营：' + ({follow: '跟着国王走', charge: '冲锋！', hold: '原地坚守', auto: '交给 AI 副将'})[k]);
   }
 }}};
 </script></body></html>
@@ -62,7 +68,7 @@ Task { @MainActor in
     }
     func script(_ source: String) async { _ = try? await web.evaluateJavaScript(source) }
     func reset(sel: Int = -1, paused: Bool = false) async {
-        await script("window.calls = []; window.sel = \(sel); window.inBattle = true; window.explode = false; window.explodeOn = -99; window.kingDead = false; window.nearIds = [0, 1]; window.setView(true); bats.forEach(function(b) { b.manual = false; b.order = {kind: 'idle'}; }); document.getElementById('wPause').textContent = '\(paused ? "继续" : "暂停")';")
+        await script("window.calls = []; window.sel = \(sel); window.inBattle = true; window.explode = false; window.explodeOn = -99; window.kingDead = false; window.nearIds = [0, 1]; document.getElementById('wToast').hidden = true; window.setView(true); bats.forEach(function(b) { b.manual = false; b.order = {kind: 'idle'}; }); document.getElementById('wPause').textContent = '\(paused ? "继续" : "暂停")';")
     }
     var L: [String] = [], P = ""
     func sync() async { L = await calls(); P = await pausedText() }
@@ -116,22 +122,30 @@ Task { @MainActor in
     // near goes through quick(); unsupported commands are refused without any call.
     await reset()
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "charge"]))
-    await sync(); precondition(result.ok && result.message == "已发出" && L == ["quick:charge"], "near \(result.summary)")
-    // Repeating the same order changes nothing: reported as not issued instead of a false success.
+    await sync(); precondition(result.ok && result.message.hasPrefix("身边 2 个营") && L == ["quick:charge"], "near \(result.summary)")
+    precondition(result.message.hasPrefix("身边 2 个营"), "toast message \(result.message)")
+    // Orders that change no visible state are still real: auto on AI battalions, repeated hold, follow.
+    for command in ["auto", "follow", "hold", "hold"] {
+        await reset()
+        await script("bats[0].manual = true; bats[0].order = {kind: 'hold'};")
+        result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": command]))
+        precondition(result.ok && result.message.hasPrefix("身边 2 个营"), "near \(command) \(result.summary)")
+    }
+    // A stale toast from earlier must not be mistaken for this order's result.
     await reset()
-    await script("bats[0].manual = true; bats[0].order = {kind: 'charge'}; bats[1].manual = true; bats[1].order = {kind: 'charge'};")
-    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "charge"]))
-    precondition(!result.ok && result.message == "国王身边没有可指挥的营", "unchanged near \(result.summary)")
+    await script("var tt = document.getElementById('wToast'); tt.textContent = '国王倒下了'; tt.hidden = false;")
+    result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "auto"]))
+    precondition(result.ok, "stale toast \(result.summary)")
     // Nobody near the king.
     await reset()
     await script("window.nearIds = []")
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "hold"]))
-    precondition(!result.ok && result.message == "国王身边没有可指挥的营")
+    precondition(!result.ok && result.message.contains("没有我方的营"), "none near \(result.message)")
     // King down: refuse before calling quick().
     await reset()
     await script("window.kingDead = true")
     result = GameRunResult(await GameBridge.call(web, "run", ["targets": "near", "cmd": "hold"]))
-    await sync(); precondition(!result.ok && result.message.contains("国王倒下") && L.isEmpty)
+    await sync(); precondition(!result.ok && result.message.contains("国王倒下") && L == ["quick:hold"], "king dead \(result.message)")
     // Map view: quick() would silently do nothing, so near is refused with guidance and quick() is never called.
     await reset()
     await script("window.setView(false)")

@@ -86,7 +86,9 @@ func multi(_ text: String) -> [GameIntent] { gameParseCommands(text, bats: bats)
 precondition(multi("骑兵冲锋弓兵坚守") == [intent(.command(.charge), .units([6, 7]), "骑兵"), intent(.command(.hold), .units([4, 5]), "弓兵")], "\(multi("骑兵冲锋弓兵坚守"))")
 precondition(multi("小墨小墨骑兵冲杀，弓箭手撤退") == [intent(.command(.charge), .units([6, 7]), "骑兵"), intent(.command(.retreat), .units([4, 5]), "弓兵")])
 precondition(multi("继续前进") == [intent(.command(.advance), .units(allIDs), "全军")])
-precondition(multi("全军前进暂停") == [intent(.command(.advance), .units(allIDs), "全军")])
+precondition(multi("全军前进暂停") == [intent(.command(.advance), .units(allIDs), "全军"), intent(.pause, .near)])
+precondition(multi("全军撤退暂停") == [intent(.command(.retreat), .units(allIDs), "全军"), intent(.pause, .near)], "\(multi("全军撤退暂停"))")
+precondition(multi("全军撤退，继续") == [intent(.command(.retreat), .units(allIDs), "全军"), intent(.resume, .near)])
 precondition(multi("剑盾兵一营前进重骑兵二营冲锋").count == 2)
 precondition(multi("随便说说").isEmpty && multi("").isEmpty)
 
@@ -97,6 +99,9 @@ let plainResult = GameRunResult(["ok": true, "done": [["name": "重骑兵", "cmd
 precondition(plainResult.spoken(for: gameParseCommand("重骑兵冲锋", bats: bats)!) == "重骑兵冲锋")
 let nearFail = GameRunResult(["ok": false, "done": [], "skipped": [], "message": "国王身边没有可指挥的营"])
 precondition(nearFail.spoken(for: gameParseCommand("跟我来", bats: bats)!) == "国王身边没有可指挥的营")
+
+let partial = GameRunResult(["ok": true, "done": [["name": "剑盾兵1营", "cmd": "charge"]], "skipped": [["name": "9", "reason": "已经不在场"]], "message": "已发出"])
+precondition(partial.spoken(for: gameParseCommand("剑盾兵一营冲锋", bats: bats)!) == "剑盾兵1营冲锋，1个营不在场")
 
 // Spoken replies and bridge arguments.
 precondition(gameParseCommand("骑兵冲锋", bats: bats)?.spoken == "骑兵冲锋")
