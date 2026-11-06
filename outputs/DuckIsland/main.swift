@@ -15,6 +15,8 @@ func sentenceCount(_ text: String) -> Int {
     let review: ReviewModel
     let windowOCR: WindowOCRSession
     let larkProxy: LarkProxySession
+    let game = GameWindow()
+    private var gameChanges: AnyCancellable?
     let launcher = LauncherModel()
     lazy var launcherPanel = LauncherPanel(model:launcher)
     var attachReview: (ScreenTarget, String) async -> Bool = { _, _ in false }
@@ -93,6 +95,14 @@ func sentenceCount(_ text: String) -> Int {
         let lark = self.larkProxy
         attachLarkProxy = { target, note in await lark.attach(target,note:note) }
         reframeOCR = { ocr.reframe() }
+        game.session.microphoneBlockReason = { [weak self] in
+            guard let self else { return nil }
+            if self.recording || self.microphoneReserved || self.busy { return "会议录音中，请先结束会议再开始语音指挥" }
+            if self.review.voice.voiceActive || self.review.live.active { return "批阅语音占用麦克风，请先结束" }
+            if self.windowOCR.live.active { return "读屏发言占用麦克风，请先关闭" }
+            return nil
+        }
+        gameChanges = game.session.$listening.sink { [weak self] _ in DispatchQueue.main.async { self?.updateVoiceAvailability() } }
         launcher.onLaunch = { [weak self] target, capability, note in Task { @MainActor in await self?.launch(target,capability,note:note) } }
         launcher.onClose = { [weak self] in self?.launcherPanel.hide() }
         self.review.panels.islandExtraHeight = { [weak self] in
@@ -139,7 +149,7 @@ func sentenceCount(_ text: String) -> Int {
         }
     }
     private func updateVoiceAvailability() {
-        review.voice.unavailableReason = microphoneReserved ? "会议录音中，可输入文字" : nil
+        review.voice.unavailableReason = microphoneReserved ? "会议录音中，可输入文字" : game.session.listening ? "陪玩语音指挥占用麦克风，可输入文字" : nil
     }
     func quickReadScreen() {
         guard !terminationRequested else { return }
@@ -194,6 +204,7 @@ func sentenceCount(_ text: String) -> Int {
         if review.active, !(await review.closeForTermination()) { return false }
         if windowOCR.active, !(await windowOCR.end()) { return false }
         if larkProxy.active, !(await larkProxy.end()) { return false }
+        if game.isOpen { game.close() }
         return true
     }
     func endCurrentWorkAction() async {
@@ -234,8 +245,22 @@ func sentenceCount(_ text: String) -> Int {
         guard !terminationRequested else { return }
         showMenu = false; expanded = false; screenReader.open()
     }
+    func openGame() {
+        guard !terminationRequested, !launching else { return }
+        if game.isOpen { game.show(); return }
+        if (review.active && review.busy) || (windowOCR.active && windowOCR.reader.busy) { notify("正在处理，请稍后再试"); return }
+        launching = true
+        Task { @MainActor in
+            defer { launching = false }
+            guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
+            guard !terminationRequested else { return }
+            screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
+            game.show()
+        }
+    }
     func meeting() {
         guard !terminationRequested else { return }
+        guard !game.session.listening, !game.session.preparing else { notify("请先关闭陪玩语音指挥，再开始会议"); return }
         guard !review.voice.voiceActive, !review.live.active else { notify("请先结束批阅语音，等待转写完成后开始会议"); return }
         guard !windowOCR.live.active else { notify("请先关闭读屏发言，等待对话结束后开始会议"); return }
         guard !busy else { return }
@@ -971,6 +996,9 @@ final class IslandPanel: NSPanel {
         menu.addItem(withTitle:shortcutAvailable ? "结束当前工作　⌥ E" : "结束当前工作（快捷键不可用）",action:#selector(detachReview),keyEquivalent:"")
         menu.addItem(withTitle:"恢复最近批阅",action:#selector(restoreReview),keyEquivalent:"")
         menu.addItem(withTitle: "快捷框选取字", action: #selector(quickReadScreen), keyEquivalent: "")
+        #if !APP_STORE
+        menu.addItem(withTitle: "陪玩 · 守城小国王", action: #selector(openGame), keyEquivalent: "")
+        #endif
         menu.addItem(withTitle: "显示 Mo · 墨", action: #selector(show), keyEquivalent: "")
         menu.addItem(withTitle: "回到屏幕顶部", action: #selector(reset), keyEquivalent: "")
         #if APP_STORE
@@ -1024,6 +1052,7 @@ final class IslandPanel: NSPanel {
     }
     #endif
     @objc func openSettings() { SettingsWindow.shared.show() }
+    @objc func openGame() { model.openGame() }
     @objc func recentRecords() { model.showRecentRecords() }
     @objc func recoverMeetings() { model.recoverUnsavedMeetings() }
     @objc func quit() { NSApp.terminate(nil) }
@@ -1044,6 +1073,7 @@ final class IslandPanel: NSPanel {
                 terminating = false; reply(false); return
             }
             if model.larkProxy.active { _ = await model.larkProxy.end() }
+            if model.game.isOpen { model.game.close() }
             if model.windowOCR.active, !(await model.windowOCR.end()) {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return

@@ -28,6 +28,11 @@
 	<string>Mo · 墨需要录制系统音频，将会议声音转换成文字。</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 chao lv</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Mo · 墨需要麦克风，将你说的话实时转换为文字。</string>
 	<key>NSScreenCaptureUsageDescription</key>
