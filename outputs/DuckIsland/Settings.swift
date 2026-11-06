@@ -110,7 +110,7 @@ enum LarkAuthProbe {
 
 // MARK: - Window
 
-enum SettingsSection: String, CaseIterable { case general, live, meeting, lark }
+enum SettingsSection: String, CaseIterable { case general, live, meeting, lark, game }
 
 @MainActor final class SettingsNavigator: ObservableObject {
     @Published var target: SettingsSection?
@@ -253,6 +253,7 @@ struct SettingsContent: View {
             }.id(SettingsSection.meeting)
             #if !APP_STORE
             SettingsCard(title: "Lark 代发", symbol: "paperplane") { LarkSettingsForm() }.id(SettingsSection.lark)
+            SettingsCard(title: "陪玩", symbol: "gamecontroller") { GameSettingsForm() }.id(SettingsSection.game)
             #endif
         }
     }
