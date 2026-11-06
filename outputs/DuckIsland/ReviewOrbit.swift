@@ -40,8 +40,9 @@ final class ReviewGlowView: NSView {
 struct ReviewOrbitView: View {
     @ObservedObject private var live: MoLiveSession
     init(model:ReviewModel,voice:VoiceInput) {
-        self.model = model; self.voice = voice; self.live = model.live
+        self.model = model; self.voice = voice; self.live = model.live; self.summary = model.liveSummary
     }
+    @ObservedObject private var summary:MoLiveSummary
     @ObservedObject var model: ReviewModel
     @ObservedObject var voice: VoiceInput
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -66,7 +67,7 @@ struct ReviewOrbitView: View {
                     .position(x:37,y:105).zIndex(1)
             }
             Button { model.toggleSinglePage() } label: {
-                MoOrb(ringColor:ringColor,busy:model.busy,listening:voice.dictating || live.ready)
+                MoOrb(ringColor:ringColor,busy:model.busy,activity:{ model.activityState })
             }.disabled(model.busy || model.historyPresented)
                 .accessibilityLabel(model.paused ? "退出批阅模式" : "进入批阅模式并截图")
                 .help("点击进入／退出批阅；拖动移动呼吸灯 · \(model.shortcutHint ?? "")")
@@ -103,11 +104,12 @@ struct ReviewOrbitView: View {
 struct MoOrb: View {
     let ringColor: Color
     let busy: Bool
-    let listening: Bool
+    let activity:() -> MoActivityState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        TimelineView(.animation(minimumInterval:1/30,paused:reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval:reduceMotion ? 1 : 1/30)) { context in
+            let state = activity()
             let time = context.date.timeIntervalSinceReferenceDate
             let phase = reduceMotion ? 0.5 : (sin(time*2.5)+1)/2
             ZStack {
@@ -118,7 +120,7 @@ struct MoOrb: View {
                 Circle().stroke(ringColor.opacity(0.7+phase*0.3),lineWidth:2).frame(width:62,height:62)
                 Circle().fill(colorScheme == .dark ? Color(red:0.16,green:0.23,blue:0.30) : Color(red:0.14,green:0.18,blue:0.23)).frame(width:58,height:58)
                 VStack(spacing:1) {
-                    MoDigitalAvatar(listening:listening)
+                    MoActivityAvatar(state:state,size:40)
                         .frame(width:40,height:40)
                         .offset(y:reduceMotion ? 0 : sin(time*1.8)*0.6)
                     Text("Mo").font(.system(size:9,weight:.semibold,design:.rounded)).foregroundStyle(.white)
@@ -129,20 +131,6 @@ struct MoOrb: View {
     }
 }
 
-struct MoDigitalAvatar: View {
-    let listening: Bool
-    var body: some View {
-        Image(nsImage:MascotAssets.images["jay"]!)
-            .resizable().interpolation(.high).scaledToFill()
-            .frame(width:40,height:40)
-            .scaleEffect(1.3,anchor:UnitPoint(x:0.46,y:0.62))
-            .clipShape(Circle())
-            .overlay(Circle().stroke(.white.opacity(0.65),lineWidth:1).allowsHitTesting(false))
-            .overlay(alignment:.topTrailing) {
-                if listening { Circle().fill(.red).frame(width:6,height:6).overlay(Circle().stroke(.white,lineWidth:1)).allowsHitTesting(false) }
-            }
-    }
-}
 
 final class ReviewControlsHostingView<Content:View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event:NSEvent?) -> Bool { true }
@@ -632,5 +620,176 @@ struct ReviewAISummaryView: View {
                 Button(model.aiSummary.isEmpty ? "整理" : "重新整理") { model.summarizeReview() }.disabled(model.summaryBusy)
             }
         }.padding(20).frame(width:560,height:460)
+    }
+}
+
+// Activity is derived from actual capture, requests, playback and action receipts.
+enum MoActivityTarget { case review, chat, summary, cleanup, reader, meeting }
+enum MoActivityKind {
+    case idle, reviewing, selecting, connecting, closing, listening, transcribing, thinking, speaking, reading, summarizing, executing, completed, failed
+    var priority:Int {
+        switch self {
+        case .speaking: return 100
+        case .executing: return 90
+        case .thinking: return 80
+        case .reading: return 70
+        case .transcribing: return 65
+        case .listening: return 60
+        case .connecting, .closing: return 55
+        case .summarizing: return 30
+        case .failed: return 10
+        case .completed: return 5
+        case .selecting: return 3
+        case .reviewing: return 1
+        case .idle: return 0
+        }
+    }
+    var symbol:String {
+        switch self {
+        case .listening: return "mic.fill"
+        case .speaking: return "speaker.wave.2.fill"
+        case .thinking: return "ellipsis.bubble"
+        case .reading: return "viewfinder"
+        case .summarizing: return "sparkles"
+        case .executing: return "arrow.triangle.2.circlepath"
+        case .completed: return "checkmark"
+        case .failed: return "exclamationmark.triangle.fill"
+        case .transcribing: return "text.bubble"
+        case .connecting, .closing: return "network"
+        case .selecting: return "macwindow"
+        case .reviewing: return "square.and.pencil"
+        case .idle: return "circle"
+        }
+    }
+    var color:Color {
+        switch self {
+        case .failed: return .orange
+        case .listening: return .red
+        case .speaking: return .cyan
+        case .summarizing, .thinking: return .purple
+        case .completed: return .green
+        default: return .mint
+        }
+    }
+    var animated:Bool { priority >= 30 && self != .listening && self != .speaking }
+}
+struct MoActivity: Identifiable {
+    let id:String
+    let kind:MoActivityKind
+    let title:String
+    var target:MoActivityTarget = .review
+    var level:CGFloat = 0
+    var detail = ""
+    var expiresAt:Date? = nil
+}
+struct MoActivityState {
+    let primary:MoActivity
+    let secondary:[MoActivity]
+    var context = ""
+    static func resolve(_ activities:[MoActivity],now:Date = Date()) -> MoActivityState {
+        let sorted = activities.filter { $0.expiresAt.map { $0 > now } ?? true }.sorted {
+            $0.kind.priority == $1.kind.priority ? $0.id < $1.id : $0.kind.priority > $1.kind.priority
+        }
+        return MoActivityState(primary:sorted.first ?? MoActivity(id:"idle",kind:.idle,title:"就绪"),secondary:Array(sorted.dropFirst()).filter { $0.kind != .reviewing })
+    }
+    var description:String { ([context] + ([primary]+secondary).map { $0.title + ($0.detail.isEmpty ? "" : "："+$0.detail) }).filter{!$0.isEmpty}.joined(separator:"\n") }
+}
+extension ReviewModel {
+    var activityState:MoActivityState {
+        var items = externalActivities?() ?? []
+        if live.outputPlaying { items.append(MoActivity(id:"speaking",kind:.speaking,title:"正在回答",target:.chat,level:live.outputLevel)) }
+        if live.active {
+            if live.closing { items.append(MoActivity(id:"closing",kind:.closing,title:"结束对话",target:.chat)) }
+            else if live.ready && live.capturing { items.append(MoActivity(id:"listening",kind:.listening,title:"正在聆听",target:.chat,level:live.inputLevel)) }
+            else if live.ready { items.append(MoActivity(id:"live-start",kind:.connecting,title:"启动录音",target:.chat)) }
+            else { items.append(MoActivity(id:"connecting",kind:.connecting,title:"连接对话",target:.chat)) }
+        }
+        if voice.voicePreparing { items.append(MoActivity(id:"voice-start",kind:.connecting,title:"启动录音",target:.chat)) }
+        if voice.dictating { items.append(MoActivity(id:"dictation",kind:.listening,title:active && !speakingEnabled ? "静默记录" : "正在录音",target:.chat,level:voice.inputLevel)) }
+        if voice.voiceFinishing { items.append(MoActivity(id:"transcribing",kind:.transcribing,title:"正在转写",target:.chat)) }
+        if active {
+            if textChatBusy { items.append(MoActivity(id:"thinking",kind:.thinking,title:"正在思考",target:.chat)) }
+            if let error = textChatError { items.append(MoActivity(id:"chat-error",kind:.failed,title:"回复失败",target:.chat,detail:error)) }
+            if liveSummary.enabled, liveSummary.updating { items.append(MoActivity(id:"summary",kind:.summarizing,title:"正在整理",target:.summary)) }
+            if liveSummary.enabled, let error = liveSummary.error { items.append(MoActivity(id:"summary-error",kind:.failed,title:"摘要失败",target:.summary,detail:error)) }
+            if summaryBusy { items.append(MoActivity(id:"cleanup",kind:.summarizing,title:"整理批阅",target:.cleanup)) }
+            if let error = summaryError { items.append(MoActivity(id:"cleanup-error",kind:.failed,title:"整理失败",target:.cleanup,detail:error)) }
+            if let error = voice.lastError { items.append(MoActivity(id:"voice-error",kind:.failed,title:"录音异常",target:.chat,detail:error)) }
+            if let error = live.lastError { items.append(MoActivity(id:"live-error",kind:.failed,title:"对话异常",target:.chat,detail:error)) }
+            items.append(MoActivity(id:"review",kind:picking ? .selecting : .reviewing,title:picking ? "选择窗口" : historyPresented ? "历史批阅" : paused ? (inputMode == .text ? "文字批阅" : "正在批阅") : "批阅就绪"))
+        }
+        if let workActivity { items.append(workActivity) }
+        var state = MoActivityState.resolve(items)
+        let external = state.primary.target == .reader || state.primary.target == .meeting
+        let region = external ? nil : regions.first(where:{$0.id == selectedID}).map { "#\($0.number)" }
+        let label = external ? externalActivityContext?(state.primary.target) : target?.label
+        state.context = [label,region,external ? nil : speakingEnabled ? "发言模式" : active ? "静默模式" : nil].compactMap{$0}.joined(separator:" · ")
+        return state
+    }
+    @discardableResult func beginActivity(_ title:String) -> String {
+        let id = UUID().uuidString
+        workActivity = MoActivity(id:id,kind:.executing,title:title)
+        return id
+    }
+    func endActivity(_ id:String,result:String,failed:Bool = false) {
+        guard workActivity?.id == id else { return }
+        workActivity = MoActivity(id:id,kind:failed ? .failed : .completed,title:result,detail:failed ? status : "",expiresAt:failed ? nil : Date().addingTimeInterval(3))
+    }
+    func showActivity(_ destination:MoActivityTarget) {
+        guard active else { return }
+        if let target, target.pid > 0 { NSRunningApplication(processIdentifier:target.pid)?.activate() }
+        switch destination {
+        case .summary: if liveSummary.enabled { conversationTab = .summary }
+        case .cleanup: cleanupPresented = true; conversationTab = .chat
+        case .chat: conversationTab = .chat
+        default: break
+        }
+        if [.chat,.summary,.cleanup].contains(destination) { panels.showConversation() }
+        else if historyPresented { panels.showHistory() }
+        else if active { panels.showSidebar() }
+    }
+}
+
+struct MoActivityAvatar:View {
+    let state:MoActivityState
+    var size:CGFloat = 30
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body:some View {
+        TimelineView(.animation(minimumInterval:1/15,paused:reduceMotion)) { context in
+            let phase = reduceMotion ? 0.5 : (sin(context.date.timeIntervalSinceReferenceDate*2.5)+1)/2
+            ZStack {
+                Circle().stroke(state.primary.kind.color.opacity(0.3+phase*0.5),lineWidth:2).scaleEffect(1+phase*0.08)
+                Image(nsImage:MascotAssets.images["jay"]!).resizable().interpolation(.high).scaledToFill()
+                    .frame(width:size-4,height:size-4).scaleEffect(1.3,anchor:UnitPoint(x:0.46,y:0.62)).clipShape(Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.65),lineWidth:1))
+                Image(systemName:state.primary.kind.symbol).font(.system(size:max(7,size*0.22),weight:.semibold)).foregroundStyle(.white)
+                    .padding(3).background(state.primary.kind.color,in:Circle()).offset(x:size*0.35,y:size*0.35)
+                if state.secondary.contains(where:{$0.kind == .listening}) {
+                    Circle().fill(.red).frame(width:max(5,size*0.16),height:max(5,size*0.16)).overlay(Circle().stroke(.white,lineWidth:1)).offset(x:size*0.33,y:-size*0.33)
+                }
+                if let extra = state.secondary.first(where:{$0.kind == .failed}) ?? state.secondary.first(where:{$0.kind == .summarizing}) {
+                    Image(systemName:extra.kind.symbol).font(.system(size:max(6,size*0.18),weight:.semibold)).foregroundStyle(.white)
+                        .padding(3).background(extra.kind.color,in:Circle()).offset(x:-size*0.35,y:-size*0.35)
+                }
+            }.frame(width:size,height:size)
+        }.accessibilityLabel("默默，"+state.description)
+    }
+}
+struct MoActivityStatus:View {
+    let state:MoActivityState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body:some View {
+        HStack(spacing:4) {
+            if [.listening,.speaking].contains(state.primary.kind) {
+                HStack(spacing:2) { ForEach(0..<3) { index in Capsule().fill(state.primary.kind.color).frame(width:2,height:4+max(0,min(1,state.primary.level))*CGFloat([8,15,10][index])) } }.frame(width:10)
+            } else if state.primary.kind.animated {
+                Image(systemName:state.primary.kind.symbol).foregroundStyle(state.primary.kind.color)
+                    .symbolEffect(.pulse,options:.repeating,isActive:!reduceMotion)
+            } else { Image(systemName:state.primary.kind.symbol).foregroundStyle(state.primary.kind.color) }
+            Text(state.primary.title).foregroundStyle(.white).lineLimit(1)
+            ForEach(Array((state.secondary.filter{$0.kind == .failed} + state.secondary.filter{$0.kind != .failed}).prefix(2))) { item in
+                Image(systemName:item.kind.symbol).foregroundStyle(item.kind.color).font(.system(size:8)).help(item.title)
+            }
+        }.font(.system(size:10,weight:.medium)).help(state.description).accessibilityElement(children:.ignore).accessibilityLabel(state.description)
     }
 }

@@ -36,8 +36,14 @@ struct ReviewTranscriptRecord: Identifiable, Codable {
     var text: String
 }
 enum ReviewInputMode { case text, audio }
+enum MoConversationTab { case chat, summary }
 
 @MainActor final class ReviewModel: ObservableObject {
+    @Published var conversationTab:MoConversationTab = .chat
+    @Published var cleanupPresented = false
+    @Published var workActivity:MoActivity?
+    var externalActivities:(() -> [MoActivity])?
+    var externalActivityContext:((MoActivityTarget) -> String?)?
     @Published var inputMode: ReviewInputMode = .audio
     @Published var active = false
     @Published var completed = false
@@ -86,6 +92,7 @@ enum ReviewInputMode { case text, audio }
     }
     var summaryOutdated: Bool { !aiSummary.isEmpty && aiSummaryInput != summarySourceJSON }
     private func clearAISummary() {
+        workActivity = nil; conversationTab = .chat; cleanupPresented = false
         liveSummary.reset()
         cancelTextChat(); chatDraft = ""; pendingTextQuestion = nil
         summaryCancellation?.cancel(); summaryCancellation = nil; summaryGeneration = UUID()
@@ -259,7 +266,11 @@ enum ReviewInputMode { case text, audio }
         self.liveSummary = liveSummary ?? MoLiveSummary()
         self.storageRoot = storageRoot
         panels = ReviewPanels(model:self)
-        self.liveSummary.onChange = { [weak self] in self?.scheduleSave() }
+        self.liveSummary.onChange = { [weak self] in
+            guard let self else { return }
+            if !self.liveSummary.enabled { self.conversationTab = .chat }
+            self.scheduleSave()
+        }
         live.onMessagesChanged = { [weak self] in self?.scheduleSave() }
         live.currentRegionID = { [weak self] in self?.selectedID }
         live.onSessionStarted = { [weak self] in
@@ -448,6 +459,7 @@ enum ReviewInputMode { case text, audio }
     func pause() {
         guard active, !busy, !historyPresented, let target else { return }
         busy = true; copied = false; completed = false; panels.hideCompletionMenu(); let session = token
+        let action = beginActivity("正在截图")
         status = "正在截取窗口…"
         Task {
             defer { if token == session { busy = false } }
@@ -456,16 +468,18 @@ enum ReviewInputMode { case text, audio }
                 guard token == session else { return }
                 let window = try await resolveScreenWindow(target)
                 let (data, _) = try await captureScreenWindow(target)
-                guard token == session, let image = NSImage(data:data) else { return }
+                guard token == session else { return }
+                guard let image = NSImage(data:data) else { throw NotesFailure(detail:"窗口截图无法解码") }
                 let snapshot = ReviewSnapshot(id:UUID(),image:image,png:data,frame:window.frame)
                 snapshots.append(snapshot); current = snapshot; paused = true
                 selectedID = nil; voice.loadDraft("")
                 panels.showOverlay(snapshot); panels.positionSidebar(window.frame)
                 try await persist()
+                endActivity(action,result:"已截图")
                 busy = false
                 if speakingEnabled { startLiveChat() } else { resumeLocalListening() }
                 status = "在目标窗口内拖动框选，松开后自动录音；小预览中点击编号切换意见"
-            } catch { status = "截图或保存失败：\(error.localizedDescription)，已截取画面仍保留，可重试保存"; onNotice?(status) }
+            } catch { status = "截图或保存失败：\(error.localizedDescription)，已截取画面仍保留，可重试保存"; onNotice?(status); endActivity(action,result:"截图失败",failed:true) }
         }
     }
     func setInputMode(_ mode: ReviewInputMode) async {
@@ -569,6 +583,7 @@ enum ReviewInputMode { case text, audio }
         guard !busy, !snapshots.isEmpty else { return false }
         if historyPresented { panels.showHistory(); return true }
         busy = true; defer { busy = false }
+        let action = beginActivity("正在保存批阅")
         await live.stop()
         await finishDictation(); autosave?.cancel()
         do {
@@ -577,19 +592,21 @@ enum ReviewInputMode { case text, audio }
             panels.hideCompletionMenu(); panels.hideOverlay(); panels.refreshChrome()
             status = "已保存"
             panels.showHistory()
+            endActivity(action,result:"已保存批阅")
             return true
-        } catch { status = "保存失败：\(error.localizedDescription)，批阅仍保留"; return false }
+        } catch { status = "保存失败：\(error.localizedDescription)，批阅仍保留"; endActivity(action,result:"保存失败",failed:true); return false }
     }
     func writeReviewToNotes() {
         guard !busy, !snapshots.isEmpty else { return }
         busy = true
+        let action = beginActivity("正在写入备忘录")
         Task {
             defer { busy = false }
             await live.stop()
         await finishDictation(); autosave?.cancel()
             do {
                 try await persist()
-                guard let saveFolder else { return }
+                guard let saveFolder else { throw NotesFailure(detail:"批阅保存目录不可用") }
                 let packet = try await store.prepareReviewFiles(folder:saveFolder)
                 let title = "截图批阅 · " + (target?.label ?? Date().formatted(date:.numeric,time:.shortened))
                 let text = packet.comments
@@ -597,24 +614,27 @@ enum ReviewInputMode { case text, audio }
                 let receipt = try await Task.detached { try insertIntoNotesInBackground(title:title,text:text,existingID:nil,attachmentPaths:paths) }.value
                 reviewNoteName = receipt.name; status = "已写入 Apple Notes："+receipt.name
                 onNotice?(status)
-            } catch { status = "写入 Notes 失败：\(error.localizedDescription)，本地批阅仍保留" }
+                endActivity(action,result:"已写入备忘录")
+            } catch { status = "写入 Notes 失败：\(error.localizedDescription)，本地批阅仍保留"; endActivity(action,result:"写入失败",failed:true) }
         }
     }
     func sendToCodex() {
         guard !busy, !snapshots.isEmpty else { return }
         busy = true
+        let action = beginActivity("正在打开 Codex")
         Task {
             defer { busy = false }
             await live.stop()
         await finishDictation(); autosave?.cancel()
             do {
                 try await persist()
-                guard let saveFolder else { return }
+                guard let saveFolder else { throw NotesFailure(detail:"批阅保存目录不可用") }
                 let packet = try await store.prepareReviewFiles(folder:saveFolder)
                 let command = try createReviewCodexCommand(packet)
                 guard NSWorkspace.shared.open(command) else { throw NotesFailure(detail:"无法打开 Codex 会话终端") }
                 status = "已打开 Codex 新会话终端，截图已作为附件传入，评论保存在 comments.txt"
-            } catch { status = "发送到 Codex 失败：\(error.localizedDescription)，本地批阅仍保留" }
+                endActivity(action,result:"已打开 Codex")
+            } catch { status = "发送到 Codex 失败：\(error.localizedDescription)，本地批阅仍保留"; endActivity(action,result:"打开失败",failed:true) }
         }
     }
     func updateRegionRect(_ id:UUID,rect:CGRect) {
@@ -693,6 +713,7 @@ enum ReviewInputMode { case text, audio }
     func resume() {
         guard paused, !busy, !historyPresented else { return }
         busy = true
+        let action = beginActivity("正在保存批阅")
         status = "正在保存标记并返回实时窗口…"
         let session = token
         Task {
@@ -700,13 +721,14 @@ enum ReviewInputMode { case text, audio }
             await finishDictation()
             guard token == session else { return }
             defer { busy = false }
-            do { try await persist(); panels.hideOverlay(); paused = false; panels.refreshChrome(); status = "已保存批阅，已返回实时窗口；可再次截取画面并标注" }
-            catch { status = "保存失败：\(error.localizedDescription)，批阅仍保留，请重试" }
+            do { try await persist(); panels.hideOverlay(); paused = false; panels.refreshChrome(); status = "已保存批阅，已返回实时窗口；可再次截取画面并标注"; endActivity(action,result:"已保存批阅") }
+            catch { status = "保存失败：\(error.localizedDescription)，批阅仍保留，请重试"; endActivity(action,result:"保存失败",failed:true) }
         }
     }
     func finish() {
         guard !busy, !snapshots.isEmpty else { return }
         busy = true
+        let action = beginActivity("正在复制批阅")
         status = "正在保存并复制批阅…"
         let session = token
         Task {
@@ -719,7 +741,8 @@ enum ReviewInputMode { case text, audio }
                 copied = true
                 status = "已复制"
                 onNotice?("已复制")
-            } catch { status = "保存或复制失败：\(error.localizedDescription)，内容仍在当前会话中，请重试" }
+                endActivity(action,result:"已复制")
+            } catch { status = "保存或复制失败：\(error.localizedDescription)，内容仍在当前会话中，请重试"; endActivity(action,result:"复制失败",failed:true) }
         }
     }
     func sendToClaude() { Task { await sendToClaude(using:openClaudeReview) } }

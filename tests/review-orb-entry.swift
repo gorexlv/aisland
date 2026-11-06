@@ -4,6 +4,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 Task { @MainActor in
     let model = ReviewModel()
+    model.listeningEnabled = false; model.voice.unavailableReason = "fixture: microphone disabled"
     let recorder = Recorder(review:model)
     let indicator = IslandActivityIndicator(model:recorder,review:model,voice:model.voice,reader:recorder.screenReader)
     precondition(indicator.title == "就绪")

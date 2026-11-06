@@ -5,6 +5,7 @@ import SwiftUI
     weak var model: ReviewModel?
     var sidebar: NSPanel?
     var overlay: NSPanel?
+    private(set) var conversation:NSPanel?
     private(set) var selectionOverlay: NSPanel?
     private(set) var toolbar: NSPanel?
     private(set) var glow: NSPanel?
@@ -142,6 +143,23 @@ import SwiftUI
         sidebar?.orderFrontRegardless()
     }
     func clearHighlights() { highlights.forEach{$0.close()}; highlights = [] }
+    func showConversation() {
+        guard let model else { return }
+        if model.paused, !model.historyPresented, let overlay {
+            overlay.makeKeyAndOrderFront(nil); return
+        }
+        if conversation == nil {
+            let anchor = orbAnchor
+            let area = NSScreen.screens.first(where:{$0.frame.contains(anchor)})?.visibleFrame ?? NSScreen.main?.visibleFrame ?? CGRect(x:0,y:0,width:1000,height:800)
+            let frame = CGRect(x:min(max(anchor.x-190,area.minX),area.maxX-380),y:min(max(anchor.y-440,area.minY),area.maxY-420),width:380,height:420)
+            let p = NSPanel(contentRect:frame,styleMask:[.titled,.closable,.resizable,.nonactivatingPanel],backing:.buffered,defer:false)
+            p.title = "默默"; p.isReleasedWhenClosed = false; p.hidesOnDeactivate = false; p.minSize = NSSize(width:350,height:240)
+            p.level = .floating; p.collectionBehavior = [.fullScreenAuxiliary,.stationary]
+            p.contentView = ReviewControlsHostingView(rootView:MoConversationPanel(model:model,voice:model.voice,live:model.live))
+            conversation = p
+        }
+        conversation?.makeKeyAndOrderFront(nil)
+    }
     func showOverlay(_ shot:ReviewSnapshot) {
         guard let model else { return }
         if targetFrame == nil { targetFrame = reviewScreenRect(shot.frame,desktopTop:desktopTop) }
@@ -227,8 +245,8 @@ import SwiftUI
         completionLocalMonitor = nil; completionGlobalMonitor = nil; completionFocusObserver = nil
         let panel = completion; completion = nil; panel?.close()
     }
-    func hideForWorkspace() { workspaceVisible = false; selectionOverlay?.orderOut(nil); overlay?.orderOut(nil); sidebar?.orderOut(nil); toolbar?.orderOut(nil); glow?.orderOut(nil); hideCompletionMenu() }
-    func close() { hideHistory(); clearHighlights(); hideOverlay(); sidebar?.close(); sidebar = nil; detachTarget(); relative = CGPoint(x:0.88,y:0.78); workspaceVisible = true }
+    func hideForWorkspace() { workspaceVisible = false; conversation?.orderOut(nil); selectionOverlay?.orderOut(nil); overlay?.orderOut(nil); sidebar?.orderOut(nil); toolbar?.orderOut(nil); glow?.orderOut(nil); hideCompletionMenu() }
+    func close() { conversation?.close(); conversation = nil; hideHistory(); clearHighlights(); hideOverlay(); sidebar?.close(); sidebar = nil; detachTarget(); relative = CGPoint(x:0.88,y:0.78); workspaceVisible = true }
 }
 
 func reviewToolbarFrame(_ target: CGRect, isPage: Bool, visibleFrame: CGRect? = nil) -> CGRect {

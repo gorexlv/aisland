@@ -137,12 +137,15 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
     private var engine: AVAudioEngine?
     private let player = AVAudioPlayerNode()
     private var queuedFrames = 0
+    private var playbackEpoch = UUID()
+    private var playbackSequence = 0
+    private var playback: (@Sendable (Bool,CGFloat,Int)->Void)?
     private var active = false
     private var send: (@Sendable (Data,CGFloat,Int)->Void)?
     private var packetCount = 0
     private var failure: (@Sendable (String)->Void)?
     private var errorObserver: NSObjectProtocol?
-    func start(deviceID:String?,send:@escaping @Sendable (Data,CGFloat,Int)->Void,failure:@escaping @Sendable (String)->Void) async throws -> String {
+    func start(deviceID:String?,send:@escaping @Sendable (Data,CGFloat,Int)->Void,failure:@escaping @Sendable (String)->Void,playback:@escaping @Sendable (Bool,CGFloat,Int)->Void = { _,_,_ in }) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
@@ -154,7 +157,7 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
                     session.addInput(input); session.addOutput(output)
                     output.audioSettings = [AVFormatIDKey:kAudioFormatLinearPCM,AVSampleRateKey:24000,AVNumberOfChannelsKey:1,AVLinearPCMBitDepthKey:16,AVLinearPCMIsFloatKey:false,AVLinearPCMIsBigEndianKey:false,AVLinearPCMIsNonInterleaved:false]
                     session.commitConfiguration()
-                    self.capture = session; self.output = output; self.send = send; self.failure = failure
+                    self.capture = session; self.output = output; self.send = send; self.failure = failure; self.playback = playback
                     self.errorObserver = NotificationCenter.default.addObserver(forName:AVCaptureSession.runtimeErrorNotification,object:session,queue:nil) { note in
                         failure((note.userInfo?[AVCaptureSessionErrorKey] as? NSError)?.localizedDescription ?? "麦克风会话失败")
                     }
@@ -183,21 +186,33 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         let status = data.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block,atOffset:0,dataLength:$0.count,destination:$0.baseAddress!) }
         if status == kCMBlockBufferNoErr && !data.isEmpty && data.count % 2 == 0 { let sequence = packetCount; packetCount += 1; send?(data,audioLevel(sample),sequence) }
     }
-    func silencePlayback() { queue.async { self.player.stop(); self.queuedFrames = 0 } }
+    private func reportPlayback(_ playing:Bool,level:CGFloat = 0) {
+        playbackSequence += 1; playback?(playing,level,playbackSequence)
+    }
+    func silencePlayback() { queue.async {
+        self.playbackEpoch = UUID(); self.player.stop(); self.queuedFrames = 0; self.reportPlayback(false)
+    } }
     func play(_ data:Data) {
         queue.async {
             guard self.active, data.count % 2 == 0, !data.isEmpty else { return }
             let count = data.count/2
             guard count <= 120000, self.queuedFrames+count <= 120000 else { self.failure?("语音播放积压，请重新连接"); return }
             guard let format = AVAudioFormat(standardFormatWithSampleRate:24000,channels:1), let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(count)), let samples = buffer.floatChannelData?[0] else { return }
+            var sum:Float = 0
             data.withUnsafeBytes { bytes in
-                for i in 0..<count { let value = UInt16(bytes[i*2]) | UInt16(bytes[i*2+1]) << 8; samples[i] = Float(Int16(bitPattern:value))/32768 }
+                for i in 0..<count { let value = UInt16(bytes[i*2]) | UInt16(bytes[i*2+1]) << 8; samples[i] = Float(Int16(bitPattern:value))/32768; sum += samples[i]*samples[i] }
             }
+            let level = CGFloat(min(1,sqrt(sum/Float(count))*4)), epoch = self.playbackEpoch
             buffer.frameLength = AVAudioFrameCount(count); self.queuedFrames += count
             if !self.player.isPlaying { self.player.play() }
             self.player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in
-                guard let self else { return }; self.queue.async { self.queuedFrames = max(0,self.queuedFrames-count) }
+                guard let self else { return }; self.queue.async {
+                    guard self.playbackEpoch == epoch else { return }
+                    self.queuedFrames = max(0,self.queuedFrames-count)
+                    if self.queuedFrames == 0 { self.reportPlayback(false) }
+                }
             }
+            self.reportPlayback(true,level:level)
         }
     }
     @discardableResult func stop() async -> Int {
@@ -206,7 +221,7 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
     private func stopOnQueue() {
         active = false; output?.setSampleBufferDelegate(nil,queue:nil); capture?.stopRunning()
         if let errorObserver { NotificationCenter.default.removeObserver(errorObserver) }; errorObserver = nil
-        player.stop(); engine?.stop(); if let engine { engine.detach(player) }
+        playbackEpoch = UUID(); player.stop(); reportPlayback(false); playback = nil; engine?.stop(); if let engine { engine.detach(player) }
         engine = nil; output = nil; capture = nil; queuedFrames = 0; send = nil; failure = nil
     }
 }
@@ -214,9 +229,13 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
 @MainActor final class MoLiveSession: ObservableObject {
     @Published private(set) var active = false
     @Published private(set) var ready = false
+    @Published private(set) var capturing = false
     @Published private(set) var closing = false
     @Published private(set) var status = "点击开始，与 Mo 语音对话"
     @Published private(set) var inputLevel: CGFloat = 0
+    @Published private(set) var outputPlaying = false
+    @Published private(set) var outputLevel:CGFloat = 0
+    @Published private(set) var lastError:String?
     @Published var messages: [MoChatMessage] = []
     var onMessagesChanged: (() -> Void)?
     var onUserTranscript: ((MoChatMessage)->Void)?
@@ -224,10 +243,11 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
     var onEnded: (() -> Void)?
     var onSessionStarted: (() -> Void)?
     private var repliesSuppressed = false
+    private var playbackFeedback = MoPlaybackFeedback()
     private var responsePermissionUntil = Date.distantPast
     private(set) var startedAt = Date()
     func suppressReplies() {
-        repliesSuppressed = true; responsePermissionUntil = .distantPast
+        repliesSuppressed = true; responsePermissionUntil = .distantPast; outputPlaying = false; outputLevel = 0
         audio?.silencePlayback()
     }
     var mayReply: Bool { !repliesSuppressed && Date() < responsePermissionUntil }
@@ -266,9 +286,10 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         let sessionToken = UUID(); token = sessionToken
         do {
             let key = try MoLiveKeychain.read() ?? MoLiveKeychain.importEnvironment()
-            active = true; status = "正在连接 GPT-Live…"
+            lastError = nil; active = true; status = "正在连接 GPT-Live…"
             guard await AVCaptureDevice.requestAccess(for:.audio) else { throw NotesFailure(detail:"请允许麦克风权限") }
             guard token == sessionToken, active else { return }
+            playbackFeedback = MoPlaybackFeedback(); outputPlaying = false; outputLevel = 0
             selectedDeviceID = deviceID; latestByRole = [:]; currentSessionMessages = []; regionTimeline = MoRegionTimeline(); events = []; responsePermissionUntil = .distantPast; repliesSuppressed = false; inputPackets = [:]; nextInputPacket = 0; acceptingAudio = false
             var request = URLRequest(url:URL(string:"wss://api.openai.com/v1/live/sessions")!)
             request.setValue("Bearer "+key,forHTTPHeaderField:"Authorization")
@@ -348,9 +369,16 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
                                 self.enqueue(["type":"session.input_audio.append","audio":packet.base64EncodedString()])
                             }
                         }
-                    },failure:{ [weak self] message in Task { @MainActor [weak self] in if let self, self.token == sessionToken { await self.fail(message) } } })
+                    },failure:{ [weak self] message in Task { @MainActor [weak self] in if let self, self.token == sessionToken { await self.fail(message) } } },playback:{ [weak self] playing,level,sequence in
+                        Task { @MainActor [weak self] in
+                            guard let self, self.token == sessionToken,
+                                  self.playbackFeedback.accept(playing:playing,level:level,sequence:sequence,enabled:self.ready && !self.closing && !self.repliesSuppressed) else { return }
+                            self.outputPlaying = self.playbackFeedback.playing
+                            self.outputLevel = self.playbackFeedback.level
+                        }
+                    })
                     guard token == sessionToken, active, !closing else { await audio.stop(); return }
-                    currentInputName = name; status = "正在对话 · "+name
+                    capturing = true; currentInputName = name; status = "正在对话 · "+name
                 } catch { if token == sessionToken { await fail(error.localizedDescription) } }
             }
         case "session.input_transcript.delta", "session.output_transcript.delta":
@@ -397,7 +425,7 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         let stoppingToken = token
         if closing { while active && token == stoppingToken { try? await Task.sleep(nanoseconds:20_000_000) }; return }
         guard ready else { await shutdown(); if !active { status = "已取消连接" }; return }
-        closing = true; status = "正在结束对话…"; timeout?.cancel()
+        closing = true; capturing = false; outputPlaying = false; outputLevel = 0; status = "正在结束对话…"; timeout?.cancel()
         let deadline = Date().addingTimeInterval(5)
         let captured = await audio?.stop() ?? nextInputPacket
         while active && token == stoppingToken && nextInputPacket < captured && Date() < deadline { try? await Task.sleep(nanoseconds:1_000_000) }
@@ -408,15 +436,15 @@ final class MoLiveAudio: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate,
         while active && token == stoppingToken && Date() < deadline { try? await Task.sleep(nanoseconds:20_000_000) }
         if active && token == stoppingToken { await shutdown(); if !active { status = "对话已断开，服务端结束确认超时" } }
     }
-    private func fail(_ message:String) async { await shutdown(); if !active { status = message; onEnded?() } }
+    private func fail(_ message:String) async { lastError = message; await shutdown(); if !active { status = message; onEnded?() } }
     private func shutdown() async {
         if let teardown { await teardown.value; return }
-        token = UUID(); ready = false; closing = true
+        token = UUID(); ready = false; capturing = false; closing = true
         retryTask?.cancel(); retryTask = nil
         let cleanup = Task { @MainActor in
             timeout?.cancel(); receiver?.cancel(); socket?.cancel(with:.normalClosure,reason:nil)
             socket = nil; receiver = nil; urlSession?.invalidateAndCancel(); urlSession = nil
-            pending = []; inputPackets = [:]; acceptingAudio = false; sending = false; inputLevel = 0
+            pending = []; inputPackets = [:]; acceptingAudio = false; sending = false; inputLevel = 0; outputPlaying = false; outputLevel = 0
             let audio = self.audio; self.audio = nil; await audio?.stop()
             active = false; closing = false
         }
@@ -449,8 +477,7 @@ struct MoConversationPanel: View {
     @ObservedObject var live: MoLiveSession
     @ObservedObject var liveSummary: MoLiveSummary
     @State private var settings = false
-    @State private var summary = false
-    @State private var showingSummary = false
+    private var showingSummary:Bool { model.conversationTab == .summary }
     init(model:ReviewModel,voice:VoiceInput,live:MoLiveSession) {
         self.model = model; self.voice = voice; self.live = live; self.liveSummary = model.liveSummary
     }
@@ -458,11 +485,11 @@ struct MoConversationPanel: View {
     var body: some View {
         VStack(spacing:0) {
             HStack(spacing:10) {
-                Button { showingSummary = false } label: {
+                Button { model.conversationTab = .chat } label: {
                     Text("Chat").font(.system(size:12,weight:showingSummary ? .regular : .semibold)).foregroundStyle(showingSummary ? Color.secondary : Color.primary)
                 }.buttonStyle(.plain).accessibilityLabel("Chat Tab")
                 if liveSummary.enabled {
-                    Button { showingSummary = true } label: {
+                    Button { model.conversationTab = .summary } label: {
                         Text("Summary").font(.system(size:12,weight:showingSummary ? .semibold : .regular)).foregroundStyle(showingSummary ? Color.accentColor : Color.secondary)
                     }.buttonStyle(.plain).accessibilityLabel("Summary Tab")
                 }
@@ -470,9 +497,9 @@ struct MoConversationPanel: View {
                 #if !APP_STORE
                 Toggle("Live",isOn:Binding(get:{liveSummary.enabled},set:{model.setLiveSummary($0)}))
                     .toggleStyle(.switch).controlSize(.mini).font(.system(size:10)).fixedSize().help("实时整理对话中的决定与待办")
-                Button { summary = true; if model.aiSummary.isEmpty { model.summarizeReview() } } label: { Image(systemName:"sparkles") }
+                Button { model.cleanupPresented = true; if model.aiSummary.isEmpty { model.summarizeReview() } } label: { Image(systemName:"sparkles") }
                     .buttonStyle(.plain).help("AI 整理 · 保留框选编号")
-                    .popover(isPresented:$summary) { ReviewAISummaryView(model:model) }
+                    .popover(isPresented:$model.cleanupPresented) { ReviewAISummaryView(model:model) }
                 #endif
                 Menu {
                     Button("系统默认输入") { model.changeInputDevice(nil) }
@@ -539,7 +566,7 @@ struct MoConversationPanel: View {
                 }.font(.system(size:10)).buttonStyle(.plain).disabled(model.busy)
             }.padding(.horizontal,10).padding(.top,4).padding(.bottom,8)
             }
-        }.onChange(of:liveSummary.enabled) { if !liveSummary.enabled { showingSummary = false } }
+        }.onChange(of:liveSummary.enabled) { if !liveSummary.enabled { model.conversationTab = .chat } }
             .background(Color(nsColor:.windowBackgroundColor),in:RoundedRectangle(cornerRadius:10))
             .overlay(RoundedRectangle(cornerRadius:10).stroke(.gray.opacity(0.3),lineWidth:1).allowsHitTesting(false))
             .clipShape(RoundedRectangle(cornerRadius:10)).onAppear { voice.refreshInputDevices() }
@@ -775,5 +802,19 @@ struct MoSummaryPanel: View {
                 }.padding(8).frame(maxWidth:.infinity,alignment:.leading).background(Color.primary.opacity(0.04),in:RoundedRectangle(cornerRadius:7))
             }
         }
+    }
+}
+
+// Audio callbacks cross queues; a late "playing" notification must not revive a
+// drained/silenced queue. Session identity is checked by the owning session.
+struct MoPlaybackFeedback {
+    private(set) var sequence = -1
+    private(set) var playing = false
+    private(set) var level:CGFloat = 0
+    mutating func accept(playing:Bool,level:CGFloat,sequence:Int,enabled:Bool) -> Bool {
+        guard sequence > self.sequence else { return false }
+        self.sequence = sequence; self.playing = playing && enabled
+        self.level = self.playing ? max(0,min(1,level)) : 0
+        return true
     }
 }

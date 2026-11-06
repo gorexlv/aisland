@@ -46,6 +46,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     @Published var status = "选择窗口，再框选需要读取的区域"
     @Published var savedFile:URL?
     @Published var permissionError = false
+    @Published var lastError:String?
     @Published var selecting = false
     @Published var preview:NSImage?
     private var regionPanels:[NSPanel] = []
@@ -64,7 +65,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
     func cancel() { token = UUID(); busy = false; selecting = false; overlay?.close(); overlay = nil; regionPanels.forEach { $0.close() }; regionPanels = [] }
     func hide() { cancel(); visible = false }
     func refresh() {
-        cancel(); selected = nil; targets = []; busy = true; permissionError = false
+        cancel(); selected = nil; targets = []; busy = true; lastError = nil; permissionError = false
         let session = token
         status = "正在识别当前桌面的窗口…"
         Task {
@@ -74,14 +75,14 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
                 guard session == token else { return }
                 targets = windows; status = windows.isEmpty ? "没有可选窗口，请打开应用后刷新" : "选择要框选的窗口"
                 if windows.count == 1 { select(windows[0]) }
-            } catch { guard session == token else { return }; permissionError = true; status = "请允许Mo · 墨录制屏幕后刷新" }
+            } catch { guard session == token else { return }; permissionError = true; lastError = error.localizedDescription; status = "请允许Mo · 墨录制屏幕后刷新" }
         }
     }
     func select(_ target:ScreenTarget) { selected = target; capture() }
     func capture() {
         guard let target = selected else { return }
         if target.pid == 0 { captureRegion(); return }
-        cancel(); busy = true
+        cancel(); lastError = nil; busy = true
         let session = token
         status = "正在准备框选画面…"
         Task {
@@ -100,11 +101,11 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
                 canvas.cancelled = { [weak self] in self?.cancel(); self?.status = "已取消框选，可重新框选" }
                 panel.contentView = canvas; overlay = panel; panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(canvas)
                 selecting = true; status = "在目标窗口上拖动框选 · Esc 取消"
-            } catch { guard session == token else { return }; status = error.localizedDescription }
+            } catch { guard session == token else { return }; lastError = error.localizedDescription; status = error.localizedDescription }
         }
     }
     private func extract(data:Data, region:CGRect, target:ScreenTarget, sourceRegion:CGRect? = nil) {
-        overlay?.close(); overlay = nil; selecting = false; busy = true
+        overlay?.close(); overlay = nil; selecting = false; lastError = nil; busy = true
         let session = token; status = "正在识别框选区域…"
         Task {
             defer { if session == token { busy = false } }
@@ -113,7 +114,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
                 guard session == token else { return }
                 accept(result,target:target,region:sourceRegion ?? region)
 
-            } catch { guard session == token else { return }; status = "识别失败：\(error.localizedDescription)" }
+            } catch { guard session == token else { return }; lastError = error.localizedDescription; status = "识别失败：\(error.localizedDescription)" }
         }
     }
     enum ReplacementChoice { case keep, save, discard }
@@ -126,13 +127,14 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
         save()
     }
     func save() {
+        lastError = nil
         guard let (result,target,region) = pending else { return }
         do {
             savedFile = try saveScreenRead(ScreenReadResult(text:text,image:result.image),source:target,region:region,root:storageRoot)
             savedText = text
             status = "已保存：" + (savedFile?.deletingLastPathComponent().lastPathComponent ?? "")
             onNotice?("读屏文字已保存")
-        } catch { status = "保存失败：\(error.localizedDescription)，文字仍保留，可重试保存" }
+        } catch { lastError = error.localizedDescription; status = "保存失败：\(error.localizedDescription)，文字仍保留，可重试保存" }
     }
     func preserveForTermination() -> Bool {
         if dirty { save() }
@@ -175,7 +177,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
         selecting = true
     }
     func readRegion(displayID: UInt32, name: String, region: CGRect) {
-        cancel(); busy = true; let session = token
+        cancel(); lastError = nil; busy = true; let session = token
         Task {
             do {
                 guard session == token else { return }
@@ -185,7 +187,7 @@ func saveScreenRead(_ result:ScreenReadResult, source:ScreenTarget, region:CGRec
                 selected = target
                 extract(data:data,region:CGRect(x:0,y:0,width:1,height:1),target:target,sourceRegion:region)
             } catch {
-                if session == token { busy = false; status = "采集失败：\(error.localizedDescription)，原文字保留" }
+                if session == token { busy = false; lastError = error.localizedDescription; status = "采集失败：\(error.localizedDescription)，原文字保留" }
             }
         }
     }

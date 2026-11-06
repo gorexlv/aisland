@@ -64,6 +64,7 @@ try MainActor.assumeIsolated {
     ocrModel.recording = true; ocrModel.recordingStartedAt = model.recordingStartedAt
     try renderFixture(IslandView(model:ocrModel),"reader-unsaved-meeting",NSSize(width:494,height:reader.panelHeight+122))
     let review = ReviewModel(storageRoot:root.appendingPathComponent("review"))
+    review.listeningEnabled = false; review.voice.unavailableReason = "fixture: microphone disabled"
     review.active = true; review.paused = true; review.target = targets[0]
     let shot = ReviewSnapshot(id:UUID(),image:fixtureImage,png:png,frame:CGRect(x:0,y:0,width:800,height:420),capturedAt:Date(timeIntervalSince1970:1000))
     review.snapshots = [shot]; review.current = shot
@@ -102,7 +103,7 @@ try MainActor.assumeIsolated {
         IslandView(model:model).frame(width:494,height:484)
         IslandView(model:cleanModel).frame(width:494,height:444)
         VStack(spacing:0) {
-            Image(nsImage:MascotAssets.images["duck"]!).resizable().scaledToFit().frame(width:23,height:23).frame(width:208,height:34).background(.black,in:UnevenRoundedRectangle(bottomLeadingRadius:18,bottomTrailingRadius:18))
+            MoActivityAvatar(state:review.activityState,size:23).frame(width:208,height:34).background(.black,in:UnevenRoundedRectangle(bottomLeadingRadius:18,bottomTrailingRadius:18))
             ReviewSidebar(model:review,voice:review.voice).frame(width:494,height:580)
         }
     }.padding(24).background(Color(white:0.86)),"native-comparison",NSSize(width:1578,height:662))
