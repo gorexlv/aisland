@@ -721,7 +721,6 @@ struct IslandView: View {
 
 struct MeetingPane: View {
     @ObservedObject var model: Recorder
-    @State private var settings = false
     @State private var recovery = false
     var body: some View {
         VStack(spacing:0) {
@@ -730,10 +729,7 @@ struct MeetingPane: View {
                 Spacer(minLength:8)
                 ToolButton(title:"最近记录与任务",symbol:"clock.arrow.circlepath",action:model.showRecentRecords)
                 ToolButton(title:"会议结果",symbol:"doc.text",action:model.showMeetingResult).disabled(model.transcript.isEmpty)
-                ToolButton(title:"会议设置",symbol:"gearshape") { settings.toggle() }
-                    .popover(isPresented:$settings) {
-                        MeetingSettings(model:model)
-                    }
+                ToolButton(title:"会议设置",symbol:"gearshape") { SettingsWindow.shared.show(section:.meeting) }
                 ToolButton(title:"收起会议面板",symbol:"chevron.up") { model.expanded = false }
             }.padding(14)
             Divider().overlay(IslandStyle.line)
@@ -764,20 +760,6 @@ struct MeetingPane: View {
                 ToolButton(title:model.copied ? "已复制原文" : "复制原文",symbol:model.copied ? "checkmark" : "doc.on.doc",action:{model.copy()}).disabled(model.transcript.isEmpty)
             }.font(.system(size:12)).foregroundStyle(IslandStyle.secondary).padding(.horizontal,14).padding(.vertical,8)
         }.modifier(IslandSurface())
-    }
-}
-struct MeetingSettings: View {
-    @ObservedObject var model:Recorder
-    var body: some View {
-        VStack(alignment:.leading,spacing:16) {
-            Text("会议设置").font(.headline)
-            #if !APP_STORE
-            Toggle("结束后生成 AI 总结",isOn:Binding(get:{model.automaticSummary},set:{model.setAutomaticSummary($0)}))
-            Text("开启时会确认授权；关闭后不发送会议文字。").font(.system(size:12)).foregroundStyle(.secondary)
-            #else
-            Text("会议文字保存在本机，可同步到备忘录。").font(.system(size:13))
-            #endif
-        }.padding(18).frame(width:300).modifier(IslandSurface())
     }
 }
 struct MeetingTimer: View {
@@ -941,6 +923,7 @@ final class IslandPanel: NSPanel {
     var screenLayout: AnyCancellable?
     var activityLayout: AnyCancellable?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        SettingsWindow.shared.model = model
         panel = IslandPanel(contentRect: NSRect(x: 0, y: 0, width: 490, height: 330), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false; panel.backgroundColor = .clear
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.mainMenu.rawValue + 3); panel.hasShadow = false
@@ -981,6 +964,7 @@ final class IslandPanel: NSPanel {
         #if APP_STORE
         menu.addItem(withTitle:"隐私与使用说明",action:#selector(showPrivacy),keyEquivalent:"")
         #endif
+        menu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: "")
         menu.addItem(withTitle: "最近记录与任务", action: #selector(recentRecords), keyEquivalent: "")
         menu.addItem(withTitle: "恢复未保存会议", action: #selector(recoverMeetings), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
@@ -1027,6 +1011,7 @@ final class IslandPanel: NSPanel {
         } catch { model.notify("无法打开记录目录：" + error.localizedDescription) }
     }
     #endif
+    @objc func openSettings() { SettingsWindow.shared.show() }
     @objc func recentRecords() { model.showRecentRecords() }
     @objc func recoverMeetings() { model.recoverUnsavedMeetings() }
     @objc func quit() { NSApp.terminate(nil) }

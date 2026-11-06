@@ -35,7 +35,7 @@ PY
   cd outputs/DuckIsland
   xcrun swiftc -O main.swift RecentRecords.swift MeetingCapture.swift MeetingRecognition.swift \
     NotesExport.swift MeetingAnalysis.swift SpeechProbe.swift ScreenWindows.swift ScreenReader.swift \
-    VoiceInput.swift MoLive.swift ReviewModel.swift ReviewPanels.swift ReviewOrbit.swift Launcher.swift WindowOCR.swift ReviewExport.swift SelfTests.swift \
+    VoiceInput.swift MoLive.swift ReviewModel.swift ReviewPanels.swift ReviewOrbit.swift Launcher.swift WindowOCR.swift Settings.swift ReviewExport.swift SelfTests.swift \
     -o "$app/Contents/MacOS/DuckIsland" -framework Cocoa -framework SwiftUI -framework Speech \
     -framework AVFoundation -framework ScreenCaptureKit -framework Vision -target arm64-apple-macosx15.0
 )

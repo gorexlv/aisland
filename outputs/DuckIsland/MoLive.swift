@@ -476,7 +476,6 @@ struct MoConversationPanel: View {
     @ObservedObject var voice: VoiceInput
     @ObservedObject var live: MoLiveSession
     @ObservedObject var liveSummary: MoLiveSummary
-    @State private var settings = false
     private var showingSummary:Bool { model.conversationTab == .summary }
     init(model:ReviewModel,voice:VoiceInput,live:MoLiveSession) {
         self.model = model; self.voice = voice; self.live = live; self.liveSummary = model.liveSummary
@@ -505,8 +504,7 @@ struct MoConversationPanel: View {
                     Button("系统默认输入") { model.changeInputDevice(nil) }
                     ForEach(voice.inputDevices) { device in Button(device.name) { model.changeInputDevice(device.id) } }
                 } label: { Image(systemName:"mic") }.menuStyle(.borderlessButton).fixedSize().disabled(live.active || model.busy)
-                Button { settings = true } label: { Image(systemName:"gearshape") }.buttonStyle(.plain).help("GPT-Live 设置")
-                    .popover(isPresented:$settings) { MoLiveSettingsView(live:live) }
+                Button { SettingsWindow.shared.show(section:.live,live:live) } label: { Image(systemName:"gearshape") }.buttonStyle(.plain).help("GPT-Live 设置")
             }.padding(10)
             Divider()
             if showingSummary && liveSummary.enabled {
@@ -589,41 +587,6 @@ struct MoChatResizeGrip: View {
             .help("拖动调整高度 · 双击恢复默认").accessibilityLabel("调整对话框高度")
     }
 }
-struct MoLiveSettingsView: View {
-    @ObservedObject var live: MoLiveSession
-    @State private var key = ""
-    @State private var notice = ""
-    @State private var proxyURL = UserDefaults.standard.string(forKey:MoLiveNetwork.proxyKey) ?? ""
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        VStack(alignment:.leading,spacing:12) {
-            Text("GPT-Live 设置").font(.headline)
-            Text("gpt-live-1 · Marin\n填写自己的 OpenAI API Key，保存在本机钥匙串。开始后语音会发送至 OpenAI，按 API 用量计费。")
-                .font(.system(size:12)).foregroundStyle(.secondary)
-            SecureField("OpenAI API Key",text:$key).textFieldStyle(.roundedBorder).disabled(live.active)
-            Button("从 ~/.config/env 导入") {
-                do { _ = try MoLiveKeychain.importEnvironment(); notice = "已导入钥匙串" } catch { notice = error.localizedDescription }
-            }.disabled(live.active)
-            TextField("HTTP 代理（可选，如 http://127.0.0.1:7897）",text:$proxyURL).textFieldStyle(.roundedBorder).disabled(live.active)
-            if !notice.isEmpty { Text(notice).font(.system(size:11)).foregroundStyle(.secondary) }
-            HStack {
-                Button("删除密钥") { do { try MoLiveKeychain.remove(); notice = "已删除" } catch { notice = error.localizedDescription } }.disabled(live.active)
-                Spacer()
-                Button("关闭") { key = ""; dismiss() }
-                Button("保存") {
-                    do {
-                        _ = try MoLiveNetwork.proxyDictionary(proxyURL)
-                        if !key.isEmpty { try MoLiveKeychain.save(key); key = "" }
-                        UserDefaults.standard.set(proxyURL.trimmingCharacters(in:.whitespacesAndNewlines),forKey:MoLiveNetwork.proxyKey)
-                        notice = "设置已保存"
-                    } catch { notice = error.localizedDescription }
-                }.disabled(live.active)
-            }
-            if live.active { Text("请先结束对话再修改凭据。").font(.system(size:11)).foregroundStyle(.secondary) }
-        }.padding(20).frame(width:360)
-    }
-}
-
 func moAgentTextReply(_ input:String,cancellation:SaveCancellation? = nil) throws -> String {
     #if APP_STORE
     throw NotesFailure(detail:"此版本尚未配置文字 Agent")
