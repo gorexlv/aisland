@@ -14,10 +14,12 @@ func sentenceCount(_ text: String) -> Int {
     let screenReader: ScreenReader
     let review: ReviewModel
     let windowOCR: WindowOCRSession
+    let larkProxy: LarkProxySession
     let launcher = LauncherModel()
     lazy var launcherPanel = LauncherPanel(model:launcher)
     var attachReview: (ScreenTarget, String) async -> Bool = { _, _ in false }
     var attachOCR: (ScreenTarget, String) async -> Bool = { _, _ in false }
+    var attachLarkProxy: (ScreenTarget, String) async -> Bool = { _, _ in false }
     var reframeOCR: () -> Void = {}
     private var screenChanges: AnyCancellable?
     private var activityChanges: AnyCancellable?
@@ -75,18 +77,21 @@ func sentenceCount(_ text: String) -> Int {
     private(set) var warning = ""
     var count: Int { sentenceCount(transcript) }
 
-    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil, windowOCR: WindowOCRSession? = nil) {
+    init(recognition: MeetingRecognition = MeetingRecognition(), review: ReviewModel? = nil, screenReader: ScreenReader? = nil, windowOCR: WindowOCRSession? = nil, larkProxy: LarkProxySession? = nil) {
         self.screenReader = screenReader ?? ScreenReader()
         self.recognition = recognition
         let reviewModel = review ?? ReviewModel()
         self.review = reviewModel
         self.windowOCR = windowOCR ?? WindowOCRSession(voice:reviewModel.voice)
+        self.larkProxy = larkProxy ?? LarkProxySession()
         self.screenReader.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onNotice = { [weak self] text in self?.notify(text) }
         self.review.onRestoreRequest = { [weak self] in Task { @MainActor in await self?.restoreLatestReview() } }
         let ocr = self.windowOCR
         attachReview = { [reviewModel] target, note in await reviewModel.attach(target,note:note) }
         attachOCR = { target, note in await ocr.attach(target,note:note) }
+        let lark = self.larkProxy
+        attachLarkProxy = { target, note in await lark.attach(target,note:note) }
         reframeOCR = { ocr.reframe() }
         launcher.onLaunch = { [weak self] target, capability, note in Task { @MainActor in await self?.launch(target,capability,note:note) } }
         launcher.onClose = { [weak self] in self?.launcherPanel.hide() }
@@ -188,6 +193,7 @@ func sentenceCount(_ text: String) -> Int {
     func endCurrentWork() async -> Bool {
         if review.active, !(await review.closeForTermination()) { return false }
         if windowOCR.active, !(await windowOCR.end()) { return false }
+        if larkProxy.active, !(await larkProxy.end()) { return false }
         return true
     }
     func endCurrentWorkAction() async {
@@ -202,12 +208,18 @@ func sentenceCount(_ text: String) -> Int {
         guard await endCurrentWork() else { notify("当前工作保存失败，未切换"); return }
         guard !terminationRequested else { return }
         screenReader.cancel(); screenReader.hide(); expanded = false; showMenu = false
-        let ok = capability == .review ? await attachReview(target,note) : await attachOCR(target,note)
-        if !ok { let text = capability == .review ? review.status : windowOCR.status; if !text.isEmpty { notify(text) } }
+        let ok: Bool, failure: String
+        switch capability {
+        case .review: ok = await attachReview(target,note); failure = review.status
+        case .ocr: ok = await attachOCR(target,note); failure = windowOCR.status
+        case .larkProxy: ok = await attachLarkProxy(target,note); failure = larkProxy.status
+        }
+        if !ok, !failure.isEmpty { notify(failure) }
     }
     func primaryAction() {
         guard !terminationRequested else { return }
         if windowOCR.active { if !windowOCR.reader.busy { reframeOCR() } }
+        else if larkProxy.active { larkProxy.pollNow() }
         else if review.active { toggleReviewShortcut() }
         else { openLauncher() }
     }
@@ -1031,6 +1043,7 @@ final class IslandPanel: NSPanel {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return
             }
+            if model.larkProxy.active { _ = await model.larkProxy.end() }
             if model.windowOCR.active, !(await model.windowOCR.end()) {
                 model.notify("读屏修改尚未保存，已取消退出；请重试保存")
                 terminating = false; reply(false); return

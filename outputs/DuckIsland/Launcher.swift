@@ -4,13 +4,19 @@ import CoreGraphics
 import SwiftUI
 
 enum DuckCapability: String, CaseIterable, Identifiable {
-    case review, ocr
+    case review, ocr, larkProxy
     var id: String { rawValue }
-    var title: String { self == .review ? "批注" : "OCR 读屏" }
-    var symbol: String { self == .review ? "square.and.pencil" : "text.viewfinder" }
-    var special: Bool { false }
+    var title: String { switch self { case .review: return "批注"; case .ocr: return "OCR 读屏"; case .larkProxy: return "代发" } }
+    var symbol: String { switch self { case .review: return "square.and.pencil"; case .ocr: return "text.viewfinder"; case .larkProxy: return "paperplane" } }
+    var special: Bool { self == .larkProxy }
 }
-func duckCapabilities(for target: ScreenTarget) -> [DuckCapability] { [.review, .ocr] }
+func duckCapabilities(for target: ScreenTarget) -> [DuckCapability] {
+    #if APP_STORE
+    return [.review, .ocr]
+    #else
+    return isLarkTarget(target) ? [.larkProxy, .review, .ocr] : [.review, .ocr]
+    #endif
+}
 func launcherOrderedTargets(_ targets: [ScreenTarget], frontID: UInt32?) -> [ScreenTarget] {
     guard let frontID, let index = targets.firstIndex(where: { $0.id == frontID }) else { return targets }
     var result = targets
@@ -166,6 +172,7 @@ struct LauncherView: View {
                 Text(item.app).font(.system(size:11)).foregroundStyle(IslandStyle.secondary).lineLimit(1)
             }
             Spacer(minLength:4)
+            if duckCapabilities(for:item).first == .larkProxy { badge("代发") }
             if item.id == model.frontID { badge("当前") }
         }.padding(.horizontal,8).padding(.vertical,6).background(rowBackground(index))
             .accessibilityElement(children:.combine).accessibilityLabel((item.title.isEmpty ? item.app : item.title) + "，" + item.app + (item.id == model.frontID ? "，当前" : ""))
